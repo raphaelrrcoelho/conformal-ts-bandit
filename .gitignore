@@ -208,8 +208,8 @@ __marimo__/
 
 .vscode/
 
-data/m5/*
+conformal_ts/data/m5/*.csv
 
-data/gefcom2014/*
+conformal_ts/data/gefcom2014/*.csv
 
 cache/
