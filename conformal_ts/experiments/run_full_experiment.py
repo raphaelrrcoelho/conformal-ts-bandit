@@ -31,9 +31,6 @@ from datetime import datetime
 import time
 import argparse
 
-import warnings
-warnings.filterwarnings('ignore', message='X does not have valid feature names')
-
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
@@ -517,6 +514,11 @@ class FullExperimentRunner:
             uppers = np.array(data['uppers'])
             targets = np.array(data['targets'])
             
+            # Skip methods with no predictions
+            if len(targets) == 0:
+                logger.warning(f"No predictions for {method}, skipping evaluation")
+                continue
+            
             scores = interval_score(lowers, uppers, targets, alpha=0.10)
             cov = coverage_rate(lowers, uppers, targets)
             widths = uppers - lowers
@@ -534,7 +536,7 @@ class FullExperimentRunner:
             }
             
             # WSPL for M5
-            if 'scale_factors' in self.dataset:
+            if 'scale_factors' in self.dataset and len(targets) > 0:
                 scale = self.dataset['scale_factors']
                 # Repeat scale factors for all predictions
                 scale_repeated = np.tile(scale, len(targets) // len(scale) + 1)[:len(targets)]
@@ -542,7 +544,7 @@ class FullExperimentRunner:
                 eval_results[method]['wspl'] = float(wspl)
             
             if method == 'cts':
-                actions = np.array(data['actions'])
+                actions = np.array(data['actions'], dtype=np.int64)
                 eval_results[method]['action_distribution'] = (
                     np.bincount(actions, minlength=len(specifications)).tolist()
                 )
@@ -557,6 +559,9 @@ class FullExperimentRunner:
         
         dm_tests = {}
         for name in self.baselines:
+            # Skip baselines with no predictions
+            if len(results[name]['targets']) == 0:
+                continue
             baseline_scores = interval_score(
                 np.array(results[name]['lowers']),
                 np.array(results[name]['uppers']),
