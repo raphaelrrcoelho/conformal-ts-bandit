@@ -31,6 +31,9 @@ from datetime import datetime
 import time
 import argparse
 
+import warnings
+warnings.filterwarnings('ignore', message='X does not have valid feature names')
+
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
@@ -416,10 +419,9 @@ class FullExperimentRunner:
             
             for name, baseline in self.baselines.items():
                 try:
-                    # Check if baseline needs batch fitting
-                    if hasattr(baseline, '_fitted') and not baseline._fitted:
-                        baseline.fit(contexts_array, targets_array)
-                        logger.info(f"  Fitted {name}")
+                    # Always fit all baselines
+                    baseline.fit(contexts_array, targets_array)
+                    logger.info(f"  Fitted {name}")
                 except Exception as e:
                     logger.warning(f"  Failed to fit {name}: {e}")
         
@@ -463,10 +465,22 @@ class FullExperimentRunner:
         num_series = self.dataset['num_series']
         specifications = self.dataset['specifications']
         
+        train_end = self.dataset.get('train_end_day', int(sales_matrix.shape[1] * 0.7))
         val_end = self.dataset.get('val_end_day', int(sales_matrix.shape[1] * 0.85))
         test_end = self.dataset.get('test_end_day', sales_matrix.shape[1])
         max_horizon = max(self.config.forecast_horizons)
-        
+
+        # Validate evaluation range
+        eval_start = val_end
+        eval_end = test_end - max_horizon
+
+        if eval_start >= eval_end:
+            logger.warning(f"Invalid eval range: val_end={val_end}, test_end={test_end}, max_horizon={max_horizon}")
+            eval_start = train_end + 1
+            eval_end = test_end - max_horizon
+
+        logger.info(f"Evaluation range: day {eval_start} to {eval_end}")
+
         # Collect predictions
         results = {
             'cts': {'lowers': [], 'uppers': [], 'targets': [], 'actions': []},
@@ -474,7 +488,7 @@ class FullExperimentRunner:
         for name in self.baselines:
             results[name] = {'lowers': [], 'uppers': [], 'targets': []}
         
-        for day in range(val_end, test_end - max_horizon):
+        for day in range(eval_start, eval_end):
             # Sample series for evaluation
             batch_indices = np.random.choice(
                 num_series,
