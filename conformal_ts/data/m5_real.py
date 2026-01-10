@@ -54,7 +54,7 @@ class M5Config:
     """Configuration for M5 data processing."""
     
     # Data paths
-    data_dir: str = "./data/m5"
+    data_dir: str = "./conformal_ts/data/m5"
     
     # Which aggregation levels to use (1-12, or list)
     # For paper: recommend levels 8-10 for tractability

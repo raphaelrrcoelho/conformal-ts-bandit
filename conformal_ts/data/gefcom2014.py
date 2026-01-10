@@ -42,7 +42,7 @@ GEFCOM_QUANTILES = [q/100 for q in range(1, 100)]
 class GEFComConfig:
     """Configuration for GEFCom2014 data loading."""
     
-    data_dir: str = "./data/gefcom2014"
+    data_dir: str = "./conformal_ts/data/gefcom2014"
     
     # Track: 'solar', 'wind', 'load', 'price'
     track: str = "solar"

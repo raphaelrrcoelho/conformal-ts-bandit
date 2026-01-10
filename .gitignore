@@ -207,3 +207,9 @@ marimo/_lsp/
 __marimo__/
 
 .vscode/
+
+data/m5/*
+
+data/gefcom2014/*
+
+cache/

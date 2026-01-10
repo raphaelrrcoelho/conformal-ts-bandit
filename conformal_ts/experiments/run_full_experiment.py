@@ -31,6 +31,9 @@ from datetime import datetime
 import time
 import argparse
 
+import warnings
+warnings.filterwarnings('ignore', message='X does not have valid feature names')
+
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
@@ -276,6 +279,8 @@ class FullExperimentRunner:
     
     def run_training(self) -> Dict[str, Any]:
         """Run training loop."""
+        from conformal_ts.evaluation.competition_metrics import interval_score
+        
         logger.info("Starting training...")
         start_time = time.time()
         
@@ -291,6 +296,10 @@ class FullExperimentRunner:
         all_scores = []
         all_coverages = []
         all_actions = []
+        
+        # Collect data for batch-training baselines (like LightGBM)
+        collected_contexts = []
+        collected_targets = []
         
         # Pending updates (deferred for horizon)
         pending_updates = {}
@@ -311,7 +320,6 @@ class FullExperimentRunner:
                         )
                         
                         # Compute score
-                        from conformal_ts.evaluation.competition_metrics import interval_score
                         score = interval_score(
                             np.array([update['lower']]),
                             np.array([update['upper']]),
@@ -323,6 +331,10 @@ class FullExperimentRunner:
                         
                         all_scores.append(score)
                         all_coverages.append(covered)
+                        
+                        # Collect for batch training
+                        collected_contexts.append(update['context'])
+                        collected_targets.append(target)
                         
                         # Update agent
                         self.agent.update(
@@ -389,12 +401,30 @@ class FullExperimentRunner:
                     update['day'],
                     update['horizon']
                 )
+                collected_contexts.append(update['context'])
+                collected_targets.append(target)
                 all_scores.append(interval_score(
                     np.array([update['lower']]),
                     np.array([update['upper']]),
                     np.array([target])
                 )[0])
                 all_coverages.append(update['lower'] <= target <= update['upper'])
+        
+        # Fit batch-training baselines (like LightGBM)
+        if collected_contexts:
+            contexts_array = np.array(collected_contexts)
+            targets_array = np.array(collected_targets)
+            
+            logger.info(f"Fitting batch baselines on {len(targets_array)} samples...")
+            
+            for name, baseline in self.baselines.items():
+                try:
+                    # Check if baseline needs batch fitting
+                    if hasattr(baseline, '_fitted') and not baseline._fitted:
+                        baseline.fit(contexts_array, targets_array)
+                        logger.info(f"  Fitted {name}")
+                except Exception as e:
+                    logger.warning(f"  Failed to fit {name}: {e}")
         
         training_time = time.time() - start_time
         
@@ -470,10 +500,14 @@ class FullExperimentRunner:
                 
                 # Baseline predictions
                 for name, baseline in self.baselines.items():
-                    b_lower, b_upper = baseline.predict(context)
-                    results[name]['lowers'].append(b_lower)
-                    results[name]['uppers'].append(b_upper)
-                    results[name]['targets'].append(target)
+                    try:
+                        b_lower, b_upper = baseline.predict(context)
+                        results[name]['lowers'].append(b_lower)
+                        results[name]['uppers'].append(b_upper)
+                        results[name]['targets'].append(target)
+                    except RuntimeError as e:
+                        # Baseline not fitted - skip
+                        pass
         
         # Compute metrics for each method
         eval_results = {}
