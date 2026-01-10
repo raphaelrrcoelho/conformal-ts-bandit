@@ -1,125 +1,219 @@
 # Conformal Thompson Sampling for Adaptive Specification Selection
 
-Implementation of Conformal Thompson Sampling (CTS) for adaptive specification selection in time series forecasting. This combines Linear Thompson Sampling with Conformalized Quantile Regression to dynamically choose optimal forecast specifications.
+Implementation of Conformal Thompson Sampling (CTS) for adaptive specification selection in time series forecasting. This combines Linear Thompson Sampling with Conformalized Quantile Regression to dynamically choose optimal forecast specifications, with proper evaluation on benchmark datasets.
 
-## Installation
+
+## Dataset Loaders
+- **`conformal_ts/data/m5_real.py`** - Full M5 competition data loader
+  - Downloads from Kaggle API
+  - Handles 12-level hierarchy aggregation
+  - Computes proper scaling factors for WSPL
+  - Creates train/val/test splits matching competition
+
+- **`conformal_ts/data/gefcom2014.py`** - GEFCom2014 energy forecasting
+  - Solar and wind track support
+  - Weather feature integration
+  - Hourly probabilistic forecasting setup
+
+## Proper Baselines
+- **`conformal_ts/baselines/baselines.py`** - Competition-grade baselines
+  - `LightGBMQuantileBaseline` - Top M5 method
+  - `MultiQuantileLightGBM` - Full quantile distribution
+  - `FixedSpecificationBaseline` - Best fixed spec
+  - `EqualWeightEnsemble` - Ensemble averaging
+  - `AdaptiveConformalInference` - ACI (Gibbs & Candès 2021)
+  - `OracleBaseline` - Hindsight optimal (upper bound)
+  - `RandomSpecificationBaseline` - Random selection
+
+## Competition Metrics
+- **`conformal_ts/evaluation/competition_metrics.py`**
+  - WSPL (Weighted Scaled Pinball Loss) - M5 metric
+  - Pinball loss across 99 quantiles - GEFCom metric
+  - Interval score / Winkler score
+  - CRPS approximation
+  - Diebold-Mariano tests with HAC variance
+  - Bootstrap confidence intervals
+
+## Full Experiment Runner
+- **`conformal_ts/experiments/run_full_experiment.py`**
+  - Proper train/val/test splits
+  - Deferred updates (respecting forecast horizons)
+  - Checkpointing for long runs
+  - Comprehensive logging
+  - Result saving in JSON format
+
+# Quick Start
+
+## 1. Install Dependencies
 
 ```bash
 pip install -r requirements.txt
 ```
 
-## Quick Start
+## 2. Download Data
 
-```python
-import numpy as np
-from conformal_ts.models.cts_agent import ConformalThompsonSampling, CTSConfig
-
-# Create agent
-config = CTSConfig(
-    num_actions=16,       # Number of specifications
-    feature_dim=10,       # Context dimension
-    coverage_target=0.90, # Target coverage
-    warmup_rounds=50,     # Exploration phase
-    seed=42
-)
-agent = ConformalThompsonSampling(config)
-
-# Training loop
-for t in range(1000):
-    context = get_features()  # Your feature extraction
-    
-    # Agent selects specification and predicts interval
-    action, lower, upper = agent.select_and_predict(context)
-    
-    # Use specification 'action' to generate forecast
-    forecast = generate_forecast(action)
-    
-    # Observe outcome
-    outcome = observe_outcome()
-    
-    # Update agent
-    reward = agent.update(action, context, outcome)
-```
-
-## Running Experiments
-
-### Synthetic Data
 ```bash
-python -m conformal_ts.experiments.run_experiment --experiment synthetic --seed 42
+# For M5 (requires Kaggle API credentials)
+python setup_data.py --dataset m5
+
+# For GEFCom (manual download required, see instructions)
+python setup_data.py --dataset gefcom
+
+# Run quick sanity check
+python setup_data.py --test
 ```
 
-### M5 Simulation
+## 3. Run Experiments
+
 ```bash
-python -m conformal_ts.experiments.run_experiment --experiment m5_sim --seed 42
+# Quick test on simulated data (~2 minutes)
+python -m conformal_ts.experiments.run_full_experiment --quick --output ./results/quick_test
+
+# Full M5 experiment (~1-2 hours with sampling)
+python -m conformal_ts.experiments.run_full_experiment \
+    --dataset m5 \
+    --max-series 500 \
+    --output ./results/m5
+
+# Full scale M5 (several hours)
+python -m conformal_ts.experiments.run_full_experiment \
+    --dataset m5 \
+    --max-series 5000 \
+    --output ./results/m5_full
+
+# GEFCom solar track
+python -m conformal_ts.experiments.run_full_experiment \
+    --dataset gefcom \
+    --track solar \
+    --output ./results/gefcom_solar
 ```
 
-## Project Structure
+# Expected Output
+
+After running, you'll get:
+
+```
+results/
+├── results_20260109_120000.json    # Full results
+├── results_latest.json             # Symlink to latest
+└── agent_20260109_120000.json      # Saved agent state
+```
+
+The results JSON contains:
+
+```json
+{
+  "config": {...},
+  "training": {
+    "total_steps": 150000,
+    "training_time": 3600.5,
+    "final_mean_score": 45.23,
+    "final_coverage": 0.892,
+    "action_distribution": [1234, 2345, ...]
+  },
+  "evaluation": {
+    "cts": {
+      "mean_score": 42.15,
+      "score_ci_lower": 40.2,
+      "score_ci_upper": 44.1,
+      "coverage": 0.901,
+      "wspl": 0.0234
+    },
+    "lightgbm": {...},
+    "fixed_best": {...},
+    "dm_tests": {
+      "lightgbm": {
+        "pct_improvement": 7.3,
+        "p_value": 0.023,
+        "significant_0.05": true
+      }
+    }
+  }
+}
+```
+
+# File Structure
 
 ```
 conformal_ts/
-├── config.py                    # Configuration dataclasses
 ├── models/
-│   ├── linear_ts.py            # Linear Thompson Sampling
-│   ├── cqr.py                  # Conformalized Quantile Regression
-│   └── cts_agent.py            # Main CTS agent
+│   ├── linear_ts.py           # Linear Thompson Sampling
+│   ├── cqr.py                 # Conformalized Quantile Regression
+│   └── cts_agent.py           # Main CTS agent
 ├── data/
-│   ├── synthetic.py            # Synthetic data generator
-│   └── m5_loader.py            # M5 dataset loader
+│   ├── synthetic.py           # Synthetic data generator
+│   ├── m5_real.py             # M5 data loader
+│   └── gefcom2014.py          # GEFCom2014 loader
+├── baselines/
+│   ├── __init__.py            # Package init
+│   └── baselines.py           # All baseline methods
 ├── evaluation/
-│   └── metrics.py              # Interval scores, DM tests
+│   ├── metrics.py             # Original metrics
+│   └── competition_metrics.py # Competition-grade metrics
 └── experiments/
-    └── run_experiment.py       # Experiment pipeline
+    ├── run_experiment.py      # Original experiment runner
+    └── run_full_experiment.py # Full-scale runner
 ```
 
-## Core Components
+## For the Paper
 
-### Linear Thompson Sampling (`models/linear_ts.py`)
-- Disjoint linear bandit: `r = φᵀθₐ + ε`
-- Sherman-Morrison O(d²) updates
-- Variance inflation for exploration
-- Numerical stability safeguards
+When reporting results, include:
 
-### Conformalized Quantile Regression (`models/cqr.py`)
-- Online quantile regression with pinball loss
-- Rolling calibration window
-- Distribution-free coverage guarantees
-- Action-specific models
+1. **Table 1**: Main comparison
+   - Mean interval score with 95% CI
+   - Coverage rate
+   - WSPL (for M5)
 
-### Interval Scores (`evaluation/metrics.py`)
-- Proper scoring rule: `IS(l,u,y) = (u-l) + (2/α)·penalties`
-- Diebold-Mariano tests
-- Bootstrap confidence intervals
+2. **Table 2**: Statistical tests
+   - DM test p-values vs each baseline
+   - Improvement percentages
 
-## Configuration
+3. **Figure 1**: Learning curve
+   - Interval score over training
+   - Convergence behavior
 
-```python
-from conformal_ts.config import get_default_config
+4. **Figure 2**: Action distribution
+   - Which specifications selected over time
+   - Context-dependent patterns
 
-# Get default config for M5
-config = get_default_config("m5")
+## Troubleshooting
 
-# Customize
-config.ts_config.exploration_variance = 3.0
-config.cqr_config.calibration_window = 200
+### Kaggle API Issues
+```bash
+# Install kaggle
+pip install kaggle
+
+# Set up credentials (download from kaggle.com/account)
+mkdir -p ~/.kaggle
+mv ~/Downloads/kaggle.json ~/.kaggle/
+chmod 600 ~/.kaggle/kaggle.json
 ```
 
-## Key Hyperparameters
+### Memory Issues with Full M5
+```bash
+# Use sampling
+python -m conformal_ts.experiments.run_full_experiment \
+    --dataset m5 \
+    --max-series 1000  # Reduce from 30K
+```
 
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| `prior_precision` | 0.1 | Regularization (λ) |
-| `exploration_variance` | 5.0 | Posterior sampling variance |
-| `coverage_target` | 0.90 | Target coverage probability |
-| `learning_rate` | 0.02 | CQR SGD learning rate |
-| `calibration_window` | 250 | Rolling calibration buffer |
-| `warmup_rounds` | 50 | Initial exploration rounds |
+### Missing LightGBM
+```bash
+pip install lightgbm
 
-## References
+# Or run without it
+python -m conformal_ts.experiments.run_full_experiment --no-lightgbm
+```
 
-- Agrawal & Goyal (2013) - Thompson Sampling for Contextual Bandits
-- Romano, Patterson, Candès (2019) - Conformalized Quantile Regression
-- Gneiting & Raftery (2007) - Strictly Proper Scoring Rules
+## Citation
 
-## License
+If you use this code, please cite:
 
-MIT
+```bibtex
+@mastersthesis{coelho2025conformal,
+  title={Causal Reinforcement Learning for Dynamic Factor Momentum Specification in Brazilian Debenture Markets},
+  author={Coelho, Raphael R.},
+  school={IMPA},
+  year={2025}
+}
+```
