@@ -1,0 +1,61 @@
+{
+  "experiment_name": "synthetic_experiment",
+  "timestamp": "2026-01-09T22:33:26.394249",
+  "mean_interval_score": 0.5175517743915102,
+  "coverage_rate": 0.935,
+  "mean_width": 0.0,
+  "method_metrics": {
+    "CTS": {
+      "mean_score": 0.5175517743915102,
+      "std_score": 0.4337932773609776,
+      "median_score": 0.44934802140789387
+    },
+    "Fixed": {
+      "mean_score": 0.41290008294760056,
+      "std_score": 0.35609587774946083,
+      "median_score": 0.33695535809224986
+    },
+    "Ensemble": {
+      "mean_score": 0.8741875200737943,
+      "std_score": 1.0713157295859872,
+      "median_score": 0.40831012662537886
+    },
+    "Oracle": {
+      "mean_score": 0.08218679218503593,
+      "std_score": 0.10864157770204436,
+      "median_score": 0.05306072039115349
+    }
+  },
+  "dm_tests": {
+    "CTS": {
+      "mean_score": 0.5175517743915102,
+      "mean_diff": 0.10465169144390968,
+      "pct_improvement": -25.345524441851612,
+      "t_statistic": 4.132622360472907,
+      "p_value": 3.586477256711795e-05,
+      "significant": true,
+      "diff_ci_lower": 0.0525746076302173,
+      "diff_ci_upper": 0.15816545752011335
+    },
+    "Ensemble": {
+      "mean_score": 0.8741875200737943,
+      "mean_diff": 0.46128743712619374,
+      "pct_improvement": -111.71890153985119,
+      "t_statistic": 7.49384054610283,
+      "p_value": 6.683542608243442e-14,
+      "significant": true,
+      "diff_ci_lower": 0.29709925047805286,
+      "diff_ci_upper": 0.6167518828631251
+    },
+    "Oracle": {
+      "mean_score": 0.08218679218503593,
+      "mean_diff": -0.3307132907625646,
+      "pct_improvement": 80.09523476035099,
+      "t_statistic": -16.315381059606363,
+      "p_value": 0.0,
+      "significant": true,
+      "diff_ci_lower": -0.3726849933567325,
+      "diff_ci_upper": -0.29416857412118125
+    }
+  }
+}
