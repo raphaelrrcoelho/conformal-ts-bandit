@@ -190,7 +190,7 @@ class LinearThompsonSampling:
             sampled_theta = arm.theta_hat + L @ z
         except np.linalg.LinAlgError:
             # Fallback: add regularization and use eigendecomposition
-            warnings.warn("Cholesky failed, using eigendecomposition")
+            # warnings.warn("Cholesky failed, using eigendecomposition")
             inflated_cov = self.exploration_variance * arm.covariance_matrix
             inflated_cov += self.regularization_epsilon * np.eye(self.feature_dim)
             
