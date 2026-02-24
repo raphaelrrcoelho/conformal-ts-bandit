@@ -5,7 +5,20 @@ from .run_full_experiment import (
     FullExperimentRunner,
 )
 
+from .bandit_experiment import (
+    BanditExperimentConfig,
+    BanditExperimentResult,
+    run_bandit_experiment,
+    build_scores_matrix_from_series,
+    generate_regime_switching_series,
+)
+
 __all__ = [
     'ExperimentConfig',
     'FullExperimentRunner',
+    'BanditExperimentConfig',
+    'BanditExperimentResult',
+    'run_bandit_experiment',
+    'build_scores_matrix_from_series',
+    'generate_regime_switching_series',
 ]
