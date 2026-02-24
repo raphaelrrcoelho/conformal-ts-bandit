@@ -1,0 +1,306 @@
+{
+  "datasets": [
+    {
+      "dataset_name": "synthetic_high",
+      "nonstationarity_index": 0.2914446039548983,
+      "cts_mean_score": 7.0961923333309915,
+      "fixed_mean_score": 7.069283229561094,
+      "ensemble_mean_score": 7.1797828417799066,
+      "random_mean_score": 7.169367167868105,
+      "cts_coverage": 0.8950000000000001,
+      "improvement_over_fixed_pct": -0.18374106655679853,
+      "improvement_over_ensemble_pct": 1.1642484221456042,
+      "n_steps": 500,
+      "elapsed_seconds": 1.9735074499913026,
+      "nonstationarity_details": {
+        "composite_index": 0.2914446039548983,
+        "predictable_ns": 0.0,
+        "context_predictability": 0.2786666666666667,
+        "score_gap": 0.33831616113383356,
+        "spec_diversity": 0.9497487780737413
+      },
+      "aci_mean_score": 7.198573543186114,
+      "best_fixed_mean_score": 6.99663039908428,
+      "cts_score_ci": [
+        6.303083807953883,
+        8.00307453635069
+      ],
+      "fixed_score_ci": [
+        6.364718493125445,
+        7.850795993567967
+      ],
+      "improvement_ci": [
+        -1.6813535173972611,
+        1.2074063326425573
+      ],
+      "dm_statistic": 0.5945629240714854,
+      "dm_pvalue": 0.7239321652997465,
+      "n_seeds": 10
+    },
+    {
+      "dataset_name": "synthetic_medium",
+      "nonstationarity_index": 0.2985088244709722,
+      "cts_mean_score": 6.875219336030407,
+      "fixed_mean_score": 6.819231031537685,
+      "ensemble_mean_score": 7.0266229307839065,
+      "random_mean_score": 7.026194999411574,
+      "cts_coverage": 0.8964000000000001,
+      "improvement_over_fixed_pct": -1.0062730962269502,
+      "improvement_over_ensemble_pct": 2.154713526609965,
+      "n_steps": 500,
+      "elapsed_seconds": 0.9960704080003779,
+      "nonstationarity_details": {
+        "composite_index": 0.2985088244709722,
+        "predictable_ns": 0.0,
+        "context_predictability": 0.31533333333333335,
+        "score_gap": 0.3768817145789507,
+        "spec_diversity": 0.9272215504864352
+      },
+      "aci_mean_score": 6.882740560809533,
+      "best_fixed_mean_score": 6.771459628680344,
+      "cts_score_ci": [
+        6.147235672497304,
+        7.774528053836472
+      ],
+      "fixed_score_ci": [
+        6.028658261597805,
+        7.779845505147223
+      ],
+      "improvement_ci": [
+        -2.200342872581592,
+        0.1708860800332788
+      ],
+      "dm_statistic": 1.2325190838646596,
+      "dm_pvalue": 0.8911223788359561,
+      "n_seeds": 10
+    },
+    {
+      "dataset_name": "synthetic_low",
+      "nonstationarity_index": 0.30414750002513796,
+      "cts_mean_score": 6.281071570828641,
+      "fixed_mean_score": 6.14429823871175,
+      "ensemble_mean_score": 6.333778543031944,
+      "random_mean_score": 6.368128385612429,
+      "cts_coverage": 0.8946,
+      "improvement_over_fixed_pct": -2.124240979390403,
+      "improvement_over_ensemble_pct": 0.8321568530570139,
+      "n_steps": 500,
+      "elapsed_seconds": 0.9556341340066865,
+      "nonstationarity_details": {
+        "composite_index": 0.30414750002513796,
+        "predictable_ns": 0.02139366010333751,
+        "context_predictability": 0.32,
+        "score_gap": 0.34264178102052634,
+        "spec_diversity": 0.9532906783365565
+      },
+      "aci_mean_score": 6.2297205228489405,
+      "best_fixed_mean_score": 6.105013826851841,
+      "cts_score_ci": [
+        5.6233503525670026,
+        6.856509300373199
+      ],
+      "fixed_score_ci": [
+        5.555748566292484,
+        6.6579796183686275
+      ],
+      "improvement_ci": [
+        -3.4212903321359023,
+        -0.9396998859563009
+      ],
+      "dm_statistic": 3.3845281142146475,
+      "dm_pvalue": 0.9996434964166319,
+      "n_seeds": 10
+    },
+    {
+      "dataset_name": "gefcom_solar",
+      "nonstationarity_index": 0.44354125190990257,
+      "cts_mean_score": 30.03853305320706,
+      "fixed_mean_score": 31.788425659041998,
+      "ensemble_mean_score": 29.61551160292212,
+      "random_mean_score": 30.506043886516533,
+      "cts_coverage": 0.0,
+      "improvement_over_fixed_pct": 5.48720086630415,
+      "improvement_over_ensemble_pct": -1.4283779931162457,
+      "n_steps": 450,
+      "elapsed_seconds": 22.485790628998075,
+      "nonstationarity_details": {
+        "composite_index": 0.44354125190990257,
+        "predictable_ns": 0.11481404071523868,
+        "context_predictability": 0.6244444444444444,
+        "score_gap": 1.3125083653448342,
+        "spec_diversity": 0.430671157761416
+      },
+      "aci_mean_score": 28.64904794609621,
+      "best_fixed_mean_score": 28.005301841409796,
+      "cts_score_ci": [
+        24.490703115566067,
+        35.2544175418027
+      ],
+      "fixed_score_ci": [
+        26.09012977016529,
+        37.17118461878976
+      ],
+      "improvement_ci": [
+        0.016984836008227224,
+        10.534523772586551
+      ],
+      "dm_statistic": -2.3450792530843816,
+      "dm_pvalue": 0.009511517768703112,
+      "n_seeds": 10
+    },
+    {
+      "dataset_name": "gefcom_wind",
+      "nonstationarity_index": 0.39955203081360413,
+      "cts_mean_score": 120.7960165738612,
+      "fixed_mean_score": 86.74155771974185,
+      "ensemble_mean_score": 131.08103695616046,
+      "random_mean_score": 136.12434686268293,
+      "cts_coverage": 0.0,
+      "improvement_over_fixed_pct": -36.35927364831136,
+      "improvement_over_ensemble_pct": 7.84630685042488,
+      "n_steps": 450,
+      "elapsed_seconds": 19.703098427999066,
+      "nonstationarity_details": {
+        "composite_index": 0.39955203081360413,
+        "predictable_ns": 0.0,
+        "context_predictability": 0.29777777777777775,
+        "score_gap": 2.4553663123403546,
+        "spec_diversity": 0.4977601540680204
+      },
+      "aci_mean_score": 163.6492173129996,
+      "best_fixed_mean_score": 89.26354221324536,
+      "cts_score_ci": [
+        93.55060869086282,
+        147.25941936273426
+      ],
+      "fixed_score_ci": [
+        71.1067463986085,
+        100.83167730837228
+      ],
+      "improvement_ci": [
+        -47.119413512557614,
+        -25.010719147606764
+      ],
+      "dm_statistic": 14.19880420868277,
+      "dm_pvalue": 1.0,
+      "n_seeds": 10
+    },
+    {
+      "dataset_name": "ETTh1",
+      "nonstationarity_index": 0.36827324308006404,
+      "cts_mean_score": 8.612481993750878,
+      "fixed_mean_score": 8.653215923161408,
+      "ensemble_mean_score": 10.455268469250687,
+      "random_mean_score": 10.441052017175608,
+      "cts_coverage": 0.8898599915146373,
+      "improvement_over_fixed_pct": 0.4707374665353793,
+      "improvement_over_ensemble_pct": 17.62543430538711,
+      "n_steps": 16499,
+      "elapsed_seconds": 36.31899267400149,
+      "nonstationarity_details": {
+        "composite_index": 0.36827324308006404,
+        "predictable_ns": 0.0,
+        "context_predictability": 0.5482828282828283,
+        "score_gap": 0.6930123339514973,
+        "spec_diversity": 0.8018477144730742
+      },
+      "aci_mean_score": 8.458146323107519,
+      "best_fixed_mean_score": 8.527169970589933,
+      "cts_score_ci": [
+        8.586965863907158,
+        8.641425931326221
+      ],
+      "fixed_score_ci": [
+        8.653215923161408,
+        8.653215923161408
+      ],
+      "improvement_ci": [
+        0.15315635522540372,
+        0.7723323693860811
+      ],
+      "dm_statistic": -3.7056324931213807,
+      "dm_pvalue": 0.0001054319325586145,
+      "n_seeds": 10
+    },
+    {
+      "dataset_name": "ETTh2",
+      "nonstationarity_index": 0.332582380381368,
+      "cts_mean_score": 17.91067182031422,
+      "fixed_mean_score": 17.810046501268978,
+      "ensemble_mean_score": 20.266328140635892,
+      "random_mean_score": 20.239512476030452,
+      "cts_coverage": 0.8968240499424208,
+      "improvement_over_fixed_pct": -0.5649918939743657,
+      "improvement_over_ensemble_pct": 11.623498366229661,
+      "n_steps": 16499,
+      "elapsed_seconds": 36.82761908599059,
+      "nonstationarity_details": {
+        "composite_index": 0.332582380381368,
+        "predictable_ns": 0.0,
+        "context_predictability": 0.5193939393939394,
+        "score_gap": 0.562989632714055,
+        "spec_diversity": 0.8184274528357578
+      },
+      "aci_mean_score": 17.69748168243978,
+      "best_fixed_mean_score": 17.80200498450221,
+      "cts_score_ci": [
+        17.826872124825172,
+        17.99276483845999
+      ],
+      "fixed_score_ci": [
+        17.810046501268978,
+        17.810046501268978
+      ],
+      "improvement_ci": [
+        -1.023407707668,
+        -0.08872614387709016
+      ],
+      "dm_statistic": 4.5207301031140705,
+      "dm_pvalue": 0.999996918664097,
+      "n_seeds": 10
+    },
+    {
+      "dataset_name": "Weather",
+      "nonstationarity_index": 0.3985988116608313,
+      "cts_mean_score": 7.348505433585245,
+      "fixed_mean_score": 6.831926297606644,
+      "ensemble_mean_score": 8.795882567681131,
+      "random_mean_score": 8.793017773678736,
+      "cts_coverage": 0.8387430834819943,
+      "improvement_over_fixed_pct": -7.561251592533916,
+      "improvement_over_ensemble_pct": 16.455166641422036,
+      "n_steps": 66146,
+      "elapsed_seconds": 144.08519813299063,
+      "nonstationarity_details": {
+        "composite_index": 0.3985988116608313,
+        "predictable_ns": 0.005588153115395353,
+        "context_predictability": 0.4619532352348317,
+        "score_gap": 0.7221805922881315,
+        "spec_diversity": 0.8957527870834708
+      },
+      "aci_mean_score": 6.738072700376813,
+      "best_fixed_mean_score": 7.23151711284554,
+      "cts_score_ci": [
+        7.228083737723631,
+        7.5665294604973035
+      ],
+      "fixed_score_ci": [
+        6.831926297606644,
+        6.831926297606644
+      ],
+      "improvement_ci": [
+        -10.693867060719972,
+        -5.796301718344865
+      ],
+      "dm_statistic": 125.15620651442777,
+      "dm_pvalue": 1.0,
+      "n_seeds": 10
+    }
+  ],
+  "correlation": {
+    "pearson_r": -0.24936491095400445,
+    "pearson_p": 0.5514619877958247,
+    "spearman_r": -0.023809523809523815,
+    "spearman_p": 0.9553740118158806
+  }
+}
