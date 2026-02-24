@@ -32,8 +32,8 @@ class CTSConfig:
     feature_dim: int = 10
     
     # Thompson Sampling parameters
-    prior_precision: float = 0.1
-    exploration_variance: float = 5.0
+    prior_precision: float = 1.0
+    exploration_variance: float = 1.0
     
     # CQR parameters
     coverage_target: float = 0.90
@@ -536,10 +536,10 @@ if __name__ == "__main__":
     config = CTSConfig(
         num_actions=4,
         feature_dim=8,
-        prior_precision=0.1,
-        exploration_variance=5.0,
+        prior_precision=1.0,
+        exploration_variance=1.0,
         coverage_target=0.90,
-        warmup_rounds=20,
+        warmup_rounds=5,
         seed=42
     )
     

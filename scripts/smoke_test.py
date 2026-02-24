@@ -88,8 +88,8 @@ def test_linear_ts():
     bandit = LinearThompsonSampling(
         num_actions=num_actions,
         feature_dim=feature_dim,
-        prior_precision=0.1,
-        exploration_variance=5.0,
+        prior_precision=1.0,
+        exploration_variance=1.0,
         seed=42,
     )
 
@@ -231,8 +231,8 @@ def test_cts_agent():
     config = CTSConfig(
         num_actions=4,
         feature_dim=8,
-        prior_precision=0.1,
-        exploration_variance=5.0,
+        prior_precision=1.0,
+        exploration_variance=1.0,
         coverage_target=0.90,
         warmup_rounds=5,
         seed=42,

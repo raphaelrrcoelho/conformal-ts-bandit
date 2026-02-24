@@ -28,6 +28,34 @@ logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
+# Online reward normalizer (Welford's algorithm)
+# ---------------------------------------------------------------------------
+
+class _RunningNormalizer:
+    """Welford online mean/variance for reward normalization."""
+
+    def __init__(self):
+        self.n = 0
+        self.mean = 0.0
+        self.M2 = 0.0
+
+    def update(self, x: float):
+        self.n += 1
+        delta = x - self.mean
+        self.mean += delta / self.n
+        delta2 = x - self.mean
+        self.M2 += delta * delta2
+
+    def std(self) -> float:
+        if self.n < 2:
+            return 1.0
+        return max(np.sqrt(self.M2 / self.n), 1e-8)
+
+    def normalize(self, x: float) -> float:
+        return (x - self.mean) / self.std()
+
+
+# ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
 
@@ -37,9 +65,9 @@ class BanditExperimentConfig:
 
     num_specs: int = 4
     feature_dim: int = 8
-    warmup_rounds: int = 20
-    exploration_variance: float = 5.0
-    prior_precision: float = 0.1
+    warmup_rounds: int = 5
+    exploration_variance: float = 1.0
+    prior_precision: float = 1.0
     seed: int = 42
 
     # Train/test split: if > 0, first train_steps are warmup-only
@@ -232,6 +260,7 @@ def run_bandit_experiment(
     train_steps = max(config.train_steps, 0)
     warmup = max(min(config.warmup_rounds, T // 5), train_steps)
     rng = np.random.default_rng(config.seed + 999)
+    normalizer = _RunningNormalizer()
 
     # --- allocate FULL-length arrays (T) for the simulation loop ---
     cts_scores_full = np.zeros(T)
@@ -280,8 +309,13 @@ def run_bandit_experiment(
             cts_action = bandit.select_action(ctx)
         cts_selections_full[t] = cts_action
         cts_scores_full[t] = row[cts_action]
-        # Reward = negative interval score (higher is better)
-        bandit.update(cts_action, ctx, -row[cts_action])
+        # Full-information update: normalize all K rewards and update
+        # every arm so CTS learns at the same rate as CV-Fixed.
+        raw_rewards = -row  # negative scores (higher is better)
+        for val in raw_rewards:
+            normalizer.update(val)
+        normalized = [normalizer.normalize(v) for v in raw_rewards]
+        bandit.update_all_arms(ctx, normalized, selected_action=cts_action)
 
         # Coverage tracking for CTS
         if track_coverage:
@@ -782,7 +816,7 @@ if __name__ == "__main__":
     config = BanditExperimentConfig(
         num_specs=K,
         feature_dim=D,
-        warmup_rounds=20,
+        warmup_rounds=5,
         seed=123,
         train_steps=50,
     )

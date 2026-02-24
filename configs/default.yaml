@@ -19,8 +19,8 @@ num_eval_episodes: 100
 # --- Component configs ---
 
 ts_config:
-  prior_precision: 0.1
-  exploration_variance: 5.0
+  prior_precision: 1.0
+  exploration_variance: 1.0
   feature_dim: 10
   condition_number_threshold: 1.0e+10
   regularization_epsilon: 1.0e-06

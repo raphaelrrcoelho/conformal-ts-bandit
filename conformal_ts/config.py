@@ -30,10 +30,10 @@ class ThompsonSamplingConfig:
     """Configuration for Linear Thompson Sampling."""
     
     # Prior regularization (lambda in the dissertation)
-    prior_precision: float = 0.1
-    
+    prior_precision: float = 1.0
+
     # Variance inflation for exploration (sigma^2_explore)
-    exploration_variance: float = 5.0
+    exploration_variance: float = 1.0
     
     # Feature dimension (will be set based on dataset)
     feature_dim: int = 10

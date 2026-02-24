@@ -131,8 +131,8 @@ class FairExperimentConfig:
     forecast_horizons: List[int] = field(default_factory=lambda: [7, 14, 28])
     
     # CTS agent settings
-    prior_precision: float = 0.1
-    exploration_variance: float = 5.0
+    prior_precision: float = 1.0
+    exploration_variance: float = 1.0
     warmup_rounds: int = 100
     coverage_target: float = 0.90
     cqr_learning_rate: float = 0.02

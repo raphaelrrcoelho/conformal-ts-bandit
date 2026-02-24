@@ -60,8 +60,8 @@ class LinearThompsonSampling:
         self,
         num_actions: int,
         feature_dim: int,
-        prior_precision: float = 0.1,
-        exploration_variance: float = 5.0,
+        prior_precision: float = 1.0,
+        exploration_variance: float = 1.0,
         condition_number_threshold: float = 1e10,
         regularization_epsilon: float = 1e-6,
         recompute_interval: int = 100,
@@ -256,7 +256,68 @@ class LinearThompsonSampling:
         self.total_rounds += 1
         self.action_history.append(action)
         self.reward_history.append(reward)
-    
+
+    def update_all_arms(
+        self,
+        context: np.ndarray,
+        rewards: List[float],
+        selected_action: Optional[int] = None,
+    ):
+        """
+        Update posteriors for ALL arms with a full reward vector.
+
+        This converts the bandit from partial-information to
+        full-information learning while still using Thompson Sampling
+        for action *selection*.  Each arm receives its own observed
+        reward via the same Sherman-Morrison update used in
+        :meth:`update`.
+
+        Args:
+            context: Feature vector phi (shape: feature_dim,)
+            rewards: Reward for every arm (length num_actions).
+            selected_action: Optional – the arm that was actually
+                pulled (used only for history tracking).
+        """
+        context = np.asarray(context).flatten()
+        assert len(rewards) == self.num_actions, (
+            f"rewards length {len(rewards)} != num_actions {self.num_actions}"
+        )
+
+        for a in range(self.num_actions):
+            arm = self.arms[a]
+            r = rewards[a]
+
+            # Precision: A += phi @ phi^T
+            arm.precision_matrix += np.outer(context, context)
+
+            # Sherman-Morrison covariance update
+            Vphi = arm.covariance_matrix @ context
+            denom = 1.0 + context @ Vphi
+            if denom > self.regularization_epsilon:
+                arm.covariance_matrix -= np.outer(Vphi, Vphi) / denom
+            else:
+                self._recompute_covariance(arm)
+
+            # b += phi * r
+            arm.b_vector += context * r
+
+            # theta_hat = V @ b
+            arm.theta_hat = arm.covariance_matrix @ arm.b_vector
+
+            # Tracking
+            arm.pull_count += 1
+            arm.cumulative_reward += r
+            arm.updates_since_recompute += 1
+
+            if arm.updates_since_recompute >= self.recompute_interval:
+                self._check_and_recompute(arm)
+
+        # Global tracking
+        self.total_rounds += 1
+        picked = selected_action if selected_action is not None else 0
+        self.action_history.append(picked)
+        self.reward_history.append(rewards[picked])
+
     def _recompute_covariance(self, arm: ArmState):
         """Recompute covariance matrix from precision matrix."""
         try:
@@ -443,8 +504,8 @@ if __name__ == "__main__":
     bandit = LinearThompsonSampling(
         num_actions=num_actions,
         feature_dim=feature_dim,
-        prior_precision=0.1,
-        exploration_variance=5.0,
+        prior_precision=1.0,
+        exploration_variance=1.0,
         seed=42
     )
     

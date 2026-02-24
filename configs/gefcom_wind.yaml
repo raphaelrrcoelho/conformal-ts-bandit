@@ -8,7 +8,7 @@ dataset_type: "gefcom2014_wind"
 
 ts_config:
   feature_dim: 15
-  exploration_variance: 8.0   # More exploration for stronger regimes
+  exploration_variance: 1.0   # Tighter exploration with normalized rewards
   warmup_rounds: 72           # 3 days of hourly data
 
 cqr_config:
