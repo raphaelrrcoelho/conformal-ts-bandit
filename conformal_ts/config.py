@@ -7,11 +7,13 @@ This module defines all hyperparameters and settings for:
 - Dataset-specific configurations
 """
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields, asdict
 from typing import List, Optional, Dict, Any
 from enum import Enum
 import json
 from pathlib import Path
+
+import yaml
 
 
 class DatasetType(Enum):
@@ -312,6 +314,92 @@ def get_default_config(dataset: str = "m5") -> ExperimentConfig:
         config.ts_config.feature_dim = 8
     
     return config
+
+
+# ---------------------------------------------------------------------------
+# Mapping from YAML section names to their dataclass types
+# ---------------------------------------------------------------------------
+_NESTED_CONFIG_CLASSES = {
+    'ts_config': ThompsonSamplingConfig,
+    'cqr_config': CQRConfig,
+    'interval_score_config': IntervalScoreConfig,
+    'spec_config': SpecificationConfig,
+    'm5_config': M5Config,
+    'gefcom_config': GEFCom2014Config,
+    'synthetic_config': SyntheticConfig,
+}
+
+
+def _deep_merge(base: dict, override: dict) -> dict:
+    """Recursively merge *override* into *base* (returns a new dict)."""
+    merged = base.copy()
+    for key, value in override.items():
+        if key in merged and isinstance(merged[key], dict) and isinstance(value, dict):
+            merged[key] = _deep_merge(merged[key], value)
+        else:
+            merged[key] = value
+    return merged
+
+
+def load_config(yaml_path: str) -> ExperimentConfig:
+    """Load a YAML configuration file and return an ``ExperimentConfig``.
+
+    The YAML values are merged on top of the dataclass defaults so that only
+    the fields present in the file are overridden.
+
+    Parameters
+    ----------
+    yaml_path : str
+        Path to the YAML file.
+
+    Returns
+    -------
+    ExperimentConfig
+        Fully-populated configuration instance.
+    """
+    yaml_path = Path(yaml_path)
+    with open(yaml_path, 'r') as f:
+        yaml_dict = yaml.safe_load(f) or {}
+
+    # Start from default values expressed as a dict
+    default_config = ExperimentConfig()
+    base_dict = default_config._to_dict()
+
+    # Merge YAML overrides on top of defaults
+    merged = _deep_merge(base_dict, yaml_dict)
+
+    # Convert dataset_type string -> enum
+    if 'dataset_type' in merged and isinstance(merged['dataset_type'], str):
+        merged['dataset_type'] = DatasetType(merged['dataset_type'])
+
+    # Instantiate nested dataclasses
+    for key, cls in _NESTED_CONFIG_CLASSES.items():
+        if key in merged and isinstance(merged[key], dict):
+            merged[key] = cls(**merged[key])
+
+    return ExperimentConfig(**merged)
+
+
+def save_config(config: ExperimentConfig, yaml_path: str) -> None:
+    """Serialize an ``ExperimentConfig`` to a YAML file.
+
+    Parameters
+    ----------
+    config : ExperimentConfig
+        The configuration to save.
+    yaml_path : str
+        Destination file path.  Parent directories are created automatically.
+    """
+    yaml_path = Path(yaml_path)
+    yaml_path.parent.mkdir(parents=True, exist_ok=True)
+
+    config_dict = config._to_dict()
+    # Ensure the enum is stored as a plain string
+    if isinstance(config_dict.get('dataset_type'), DatasetType):
+        config_dict['dataset_type'] = config_dict['dataset_type'].value
+
+    with open(yaml_path, 'w') as f:
+        yaml.safe_dump(config_dict, f, default_flow_style=False, sort_keys=False)
 
 
 if __name__ == "__main__":

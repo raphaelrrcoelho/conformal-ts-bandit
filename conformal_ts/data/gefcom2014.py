@@ -175,7 +175,7 @@ class GEFCom2014Loader:
         rng = np.random.default_rng(seed)
         
         start_date = pd.Timestamp("2012-01-01")
-        timestamps = pd.date_range(start_date, periods=num_days*24, freq='H')
+        timestamps = pd.date_range(start_date, periods=num_days*24, freq='h')
         
         data = {'timestamp': timestamps}
         

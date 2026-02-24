@@ -17,6 +17,9 @@ pyarrow>=6.0.0  # For parquet files
 # Kaggle API (for M5 download)
 kaggle>=1.5.0
 
+# Configuration
+pyyaml>=6.0
+
 # Progress bars
 tqdm>=4.62.0
 

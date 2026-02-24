@@ -1,0 +1,25 @@
+# GEFCom2014 Solar Track Experiment
+# Overrides default.yaml for solar energy forecasting
+
+experiment_name: "gefcom2014_solar"
+dataset_type: "gefcom2014_solar"
+
+ts_config:
+  feature_dim: 15
+  warmup_rounds: 72           # 3 days of hourly data
+
+cqr_config:
+  calibration_window: 336     # 2 weeks of hourly data
+  warmup_min_observations: 48 # 2 days of hourly data
+
+spec_config:
+  lookback_windows: [24, 48, 168, 336]   # 1d, 2d, 1w, 2w in hours
+  forecast_horizons: [24, 48, 168]        # 1d, 2d, 1w in hours
+
+gefcom_config:
+  track: "solar"
+  train_months: 24
+  val_months: 6
+  test_months: 6
+  lookback_windows: [24, 48, 168, 336]
+  forecast_horizons: [24, 48, 168]

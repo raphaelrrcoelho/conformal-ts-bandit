@@ -1,0 +1,30 @@
+# Quick Test / Smoke Test Configuration
+# Minimal settings for a fast sanity check run.
+
+experiment_name: "quick_test"
+dataset_type: "synthetic"
+seed: 0
+
+log_interval: 10
+checkpoint_interval: 50
+eval_interval: 25
+num_eval_episodes: 5
+
+ts_config:
+  feature_dim: 4
+  warmup_rounds: 5
+  recompute_interval: 10
+
+cqr_config:
+  calibration_window: 30
+  warmup_min_observations: 5
+
+spec_config:
+  lookback_windows: [10, 21]
+  forecast_horizons: [10, 21]
+
+synthetic_config:
+  num_series: 10
+  series_length: 200
+  num_regimes: 2
+  regime_persistence: 0.90

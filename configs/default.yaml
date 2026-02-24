@@ -1,0 +1,98 @@
+# Conformal Thompson Sampling - Default Configuration
+# All values mirror the dataclass defaults in conformal_ts/config.py
+
+# --- Experiment-level settings ---
+experiment_name: "conformal_ts"
+seed: 42
+dataset_type: "m5"
+
+# Logging and checkpointing
+log_dir: "./logs"
+checkpoint_dir: "./checkpoints"
+log_interval: 100
+checkpoint_interval: 1000
+
+# Evaluation settings
+eval_interval: 500
+num_eval_episodes: 100
+
+# --- Component configs ---
+
+ts_config:
+  prior_precision: 0.1
+  exploration_variance: 5.0
+  feature_dim: 10
+  condition_number_threshold: 1.0e+10
+  regularization_epsilon: 1.0e-06
+  recompute_interval: 100
+  warmup_rounds: 50
+
+cqr_config:
+  coverage_target: 0.90
+  lower_quantile: 0.05
+  upper_quantile: 0.95
+  learning_rate: 0.02
+  l2_regularization: 1.0e-04
+  calibration_window: 250
+  warmup_min_observations: 20
+  warmup_interval_min: 0.002
+  warmup_interval_max: 0.05
+
+interval_score_config:
+  alpha: 0.10
+  reward_scale: 1.0
+  clip_rewards: true
+  clip_min: -10.0
+  clip_max: 0.0
+
+spec_config:
+  lookback_windows: [10, 21, 42, 63]
+  forecast_horizons: [10, 21, 42, 63]
+  use_all_combinations: true
+  custom_specifications: null
+
+# --- Dataset-specific configs ---
+
+m5_config:
+  data_dir: "./data/m5"
+  aggregation_level: "store"
+  sample_size: 1000
+  train_days: 1000
+  val_days: 100
+  test_days: 28
+  use_price_features: true
+  use_calendar_features: true
+  use_snap_features: true
+  lookback_windows: [7, 14, 28, 56]
+  forecast_horizons: [7, 14, 28]
+
+gefcom_config:
+  data_dir: "./data/gefcom2014"
+  track: "solar"
+  zones: null
+  train_months: 24
+  val_months: 6
+  test_months: 6
+  lookback_windows: [24, 48, 168, 336]   # 1d, 2d, 1w, 2w in hours
+  forecast_horizons: [24, 48, 168]        # 1d, 2d, 1w in hours
+  weather_features:
+    - "Total_Tpv"
+    - "VAR134"
+    - "VAR157"
+    - "VAR164"
+    - "VAR165"
+    - "VAR166"
+    - "VAR167"
+    - "VAR169"
+    - "VAR175"
+    - "VAR178"
+    - "VAR228"
+
+synthetic_config:
+  num_series: 100
+  series_length: 1000
+  num_regimes: 3
+  regime_persistence: 0.95
+  observation_noise: 0.1
+  regime_effect_size: 0.5
+  regime_optimal_specs: [0, 1, 2]
