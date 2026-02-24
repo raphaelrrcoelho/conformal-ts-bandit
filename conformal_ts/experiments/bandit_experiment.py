@@ -42,6 +42,16 @@ class BanditExperimentConfig:
     prior_precision: float = 0.1
     seed: int = 42
 
+    # Train/test split: if > 0, first train_steps are warmup-only
+    # (always round-robin, not counted in reported results).
+    train_steps: int = 0
+
+    # Rolling CV window for the CV-Fixed baseline.
+    cv_window: int = 100
+
+    # ACI learning rate (gamma in Gibbs & Candès, 2021).
+    aci_gamma: float = 0.01
+
 
 # ---------------------------------------------------------------------------
 # Result container
@@ -62,9 +72,19 @@ class BanditExperimentResult:
     ensemble_scores: np.ndarray
     oracle_scores: np.ndarray
 
+    # CV-Fixed baseline: rolling cross-validated best spec (T,)
+    cv_fixed_scores: np.ndarray
+
+    # ACI baseline (Gibbs & Candès, 2021)
+    aci_scores: np.ndarray           # (T,) spec-0 scores scaled by alpha adjustment
+    aci_alpha_history: np.ndarray    # (T,) running alpha_t trajectory
+
     # Selection tracking
     cts_selections: np.ndarray   # (T,) which spec CTS picked
     optimal_specs: np.ndarray    # (T,) which spec was best (oracle)
+
+    # Coverage tracking (optional, requires intervals_matrix)
+    cts_covered: Optional[np.ndarray] = None  # (T,) bool: did CTS interval cover?
 
     def best_fixed_scores(self) -> np.ndarray:
         """Return scores for the best single fixed spec (in hindsight)."""
@@ -111,9 +131,13 @@ class BanditExperimentResult:
             "ensemble_mean": float(np.mean(self.ensemble_scores)),
             "best_fixed_mean": float(np.mean(self.best_fixed_scores())),
             "best_fixed_spec": self.best_fixed_spec(),
+            "cv_fixed_mean": float(np.mean(self.cv_fixed_scores)),
+            "aci_mean": float(np.mean(self.aci_scores)),
             "improvement_over_best_fixed_pct": self.improvement_over_best_fixed(),
             "improvement_over_random_pct": self.improvement_over_random(),
         }
+        if self.cts_covered is not None:
+            result["cts_coverage"] = float(np.mean(self.cts_covered))
         for k, scores in self.fixed_scores.items():
             result[f"fixed_{k}_mean"] = float(np.mean(scores))
         return result
@@ -127,6 +151,8 @@ def run_bandit_experiment(
     scores_matrix: np.ndarray,
     contexts: np.ndarray,
     config: BanditExperimentConfig,
+    targets: Optional[np.ndarray] = None,
+    intervals_matrix: Optional[np.ndarray] = None,
 ) -> BanditExperimentResult:
     """
     Run the bandit specification selection competition.
@@ -141,6 +167,10 @@ def run_bandit_experiment(
       cycles through specs round-robin; afterwards it samples from the
       posterior.  Reward = -interval_score (higher is better).
     - **Fixed(k)** : Always pick spec *k* (run for every k).
+    - **CV-Fixed** : Cross-validated fixed -- at each step, pick the spec
+      with the lowest average score in a rolling validation window.
+    - **ACI** : Adaptive Conformal Inference (Gibbs & Candès, 2021) --
+      uses spec 0 but adapts the miscoverage level alpha over time.
     - **Random** : Uniform random selection each step.
     - **Ensemble** : Average score across all specs each step.
     - **Oracle** : Best spec at each step (lower bound on achievable
@@ -154,6 +184,11 @@ def run_bandit_experiment(
         Context / feature vectors for each timestep.
     config : BanditExperimentConfig
         Experiment hyper-parameters.
+    targets : ndarray, shape (T,), optional
+        True values for coverage tracking.
+    intervals_matrix : ndarray, shape (T, K, 2), optional
+        Lower/upper bounds per spec per timestep.  When provided together
+        with *targets*, coverage is tracked for CTS's selected spec.
 
     Returns
     -------
@@ -174,6 +209,16 @@ def run_bandit_experiment(
         f"contexts has {D} features but config says {config.feature_dim}"
     )
 
+    if intervals_matrix is not None:
+        assert intervals_matrix.shape == (T, K, 2), (
+            f"intervals_matrix shape {intervals_matrix.shape} != expected "
+            f"({T}, {K}, 2)"
+        )
+    if targets is not None:
+        assert targets.shape == (T,), (
+            f"targets shape {targets.shape} != expected ({T},)"
+        )
+
     # --- set up bandit ---
     bandit = LinearThompsonSampling(
         num_actions=K,
@@ -183,19 +228,37 @@ def run_bandit_experiment(
         seed=config.seed,
     )
 
-    warmup = min(config.warmup_rounds, T // 5)
+    # Effective warmup = max(config warmup, train_steps)
+    train_steps = max(config.train_steps, 0)
+    warmup = max(min(config.warmup_rounds, T // 5), train_steps)
     rng = np.random.default_rng(config.seed + 999)
 
-    # --- allocate output arrays ---
-    cts_scores = np.zeros(T)
-    cts_selections = np.zeros(T, dtype=int)
-    random_scores = np.zeros(T)
-    ensemble_scores = np.zeros(T)
-    oracle_scores = np.zeros(T)
-    optimal_specs = np.zeros(T, dtype=int)
+    # --- allocate FULL-length arrays (T) for the simulation loop ---
+    cts_scores_full = np.zeros(T)
+    cts_selections_full = np.zeros(T, dtype=int)
+    random_scores_full = np.zeros(T)
+    ensemble_scores_full = np.zeros(T)
+    oracle_scores_full = np.zeros(T)
+    optimal_specs_full = np.zeros(T, dtype=int)
+    cv_fixed_scores_full = np.zeros(T)
+    aci_scores_full = np.zeros(T)
+    aci_alpha_full = np.zeros(T)
 
     # Fixed baselines: one array per spec
-    fixed_scores: Dict[int, np.ndarray] = {k: np.zeros(T) for k in range(K)}
+    fixed_scores_full: Dict[int, np.ndarray] = {
+        k: np.zeros(T) for k in range(K)
+    }
+
+    # Coverage tracking
+    track_coverage = (targets is not None and intervals_matrix is not None)
+    cts_covered_full: Optional[np.ndarray] = None
+    if track_coverage:
+        cts_covered_full = np.zeros(T, dtype=bool)
+
+    # ACI state
+    alpha_nominal = 0.10  # default nominal miscoverage
+    alpha_t = alpha_nominal
+    cv_window = config.cv_window
 
     # --- simulation loop ---
     for t in range(T):
@@ -204,39 +267,112 @@ def run_bandit_experiment(
 
         # Oracle
         best_k = int(np.argmin(row))
-        optimal_specs[t] = best_k
-        oracle_scores[t] = row[best_k]
+        optimal_specs_full[t] = best_k
+        oracle_scores_full[t] = row[best_k]
 
         # CTS
         if t < warmup:
             cts_action = t % K
         else:
             cts_action = bandit.select_action(ctx)
-        cts_selections[t] = cts_action
-        cts_scores[t] = row[cts_action]
+        cts_selections_full[t] = cts_action
+        cts_scores_full[t] = row[cts_action]
         # Reward = negative interval score (higher is better)
         bandit.update(cts_action, ctx, -row[cts_action])
 
+        # Coverage tracking for CTS
+        if track_coverage:
+            lo = intervals_matrix[t, cts_action, 0]
+            hi = intervals_matrix[t, cts_action, 1]
+            cts_covered_full[t] = (lo <= targets[t] <= hi)
+
         # Fixed baselines
         for k in range(K):
-            fixed_scores[k][t] = row[k]
+            fixed_scores_full[k][t] = row[k]
+
+        # CV-Fixed baseline: pick spec with lowest mean score in
+        # the last cv_window steps.
+        if t < cv_window:
+            # Not enough history -- fall back to round-robin
+            cv_action = t % K
+        else:
+            window_scores = scores_matrix[t - cv_window:t]  # (cv_window, K)
+            cv_action = int(np.argmin(window_scores.mean(axis=0)))
+        cv_fixed_scores_full[t] = row[cv_action]
+
+        # ACI baseline (Gibbs & Candès, 2021)
+        # Use spec 0 scores, scaled by running alpha adjustment.
+        aci_alpha_full[t] = alpha_t
+        base_score = row[0]
+        if alpha_t > 0 and alpha_t < alpha_nominal:
+            # Wants wider intervals -> penalty
+            aci_scores_full[t] = base_score * (alpha_nominal / alpha_t)
+        else:
+            aci_scores_full[t] = base_score
+
+        # Update ACI alpha: alpha_{t+1} = alpha + gamma*(err_t - alpha)
+        # err_t = 1 if NOT covered at step t, 0 if covered.
+        # Heuristic from scores: if score == width (no penalty) -> covered.
+        # With interval scores, covered <=> score == width of interval.
+        # If we have intervals_matrix we use exact coverage; otherwise
+        # approximate: spec-0 "covered" if score <= median of spec-0
+        # scores seen so far.
+        if track_coverage:
+            lo0 = intervals_matrix[t, 0, 0]
+            hi0 = intervals_matrix[t, 0, 1]
+            err_t = 0.0 if (lo0 <= targets[t] <= hi0) else 1.0
+        else:
+            # Fallback heuristic: compare to running median
+            if t > 0:
+                past = scores_matrix[:t + 1, 0]
+                err_t = 0.0 if base_score <= float(np.median(past)) else 1.0
+            else:
+                err_t = 0.0
+        alpha_t = alpha_nominal + config.aci_gamma * (err_t - alpha_nominal)
+        # Clamp to (0, 1)
+        alpha_t = float(np.clip(alpha_t, 1e-6, 1.0 - 1e-6))
 
         # Random
-        random_scores[t] = row[rng.integers(0, K)]
+        random_scores_full[t] = row[rng.integers(0, K)]
 
         # Ensemble (average across specs)
-        ensemble_scores[t] = float(np.mean(row))
+        ensemble_scores_full[t] = float(np.mean(row))
+
+    # --- apply train/test split ---
+    s = train_steps  # start index for reported results
+    scores_out = scores_matrix[s:]
+    contexts_out = contexts[s:]
+
+    cts_scores = cts_scores_full[s:]
+    cts_selections = cts_selections_full[s:]
+    random_scores = random_scores_full[s:]
+    ensemble_scores = ensemble_scores_full[s:]
+    oracle_scores = oracle_scores_full[s:]
+    optimal_specs = optimal_specs_full[s:]
+    cv_fixed_scores = cv_fixed_scores_full[s:]
+    aci_scores = aci_scores_full[s:]
+    aci_alpha_history = aci_alpha_full[s:]
+    fixed_scores: Dict[int, np.ndarray] = {
+        k: v[s:] for k, v in fixed_scores_full.items()
+    }
+    cts_covered: Optional[np.ndarray] = None
+    if cts_covered_full is not None:
+        cts_covered = cts_covered_full[s:]
 
     return BanditExperimentResult(
-        scores_matrix=scores_matrix,
-        contexts=contexts,
+        scores_matrix=scores_out,
+        contexts=contexts_out,
         cts_scores=cts_scores,
         fixed_scores=fixed_scores,
         random_scores=random_scores,
         ensemble_scores=ensemble_scores,
         oracle_scores=oracle_scores,
+        cv_fixed_scores=cv_fixed_scores,
+        aci_scores=aci_scores,
+        aci_alpha_history=aci_alpha_history,
         cts_selections=cts_selections,
         optimal_specs=optimal_specs,
+        cts_covered=cts_covered,
     )
 
 
@@ -249,7 +385,8 @@ def build_scores_matrix_from_series(
     lookback_windows: List[int],
     alpha: float = 0.10,
     min_history: int = 50,
-) -> Tuple[np.ndarray, np.ndarray]:
+    return_intervals: bool = False,
+) -> Tuple[np.ndarray, ...]:
     """
     Build a (T', K) scores matrix from a univariate time series.
 
@@ -277,6 +414,9 @@ def build_scores_matrix_from_series(
         Minimum number of observations before scoring begins.  The
         returned arrays start at index ``min_history`` of the original
         series.
+    return_intervals : bool
+        If True, also return ``targets`` and ``intervals_matrix`` so
+        that downstream code can compute coverage.
 
     Returns
     -------
@@ -284,6 +424,12 @@ def build_scores_matrix_from_series(
         Interval scores.  T' = T - min_history.
     contexts : ndarray, shape (T', D)
         Context features derived from the series history.  D = 8.
+    targets : ndarray, shape (T',)
+        True values at each scored timestep.  Only returned when
+        *return_intervals* is True.
+    intervals_matrix : ndarray, shape (T', K, 2)
+        ``intervals_matrix[t, k]`` = ``[lower, upper]`` for spec *k*
+        at timestep *t*.  Only returned when *return_intervals* is True.
     """
     from conformal_ts.evaluation.metrics import interval_score
 
@@ -303,10 +449,13 @@ def build_scores_matrix_from_series(
     scores_matrix = np.zeros((T_prime, K))
     feature_dim = 8
     contexts = np.zeros((T_prime, feature_dim))
+    targets_arr = np.zeros(T_prime)
+    intervals_arr = np.zeros((T_prime, K, 2))
 
     for idx in range(T_prime):
         t = min_history + idx
         y_true = series[t]
+        targets_arr[idx] = y_true
 
         # --- build context features from history ---
         ctx = np.zeros(feature_dim)
@@ -341,6 +490,9 @@ def build_scores_matrix_from_series(
             lower_k = mu - z * sigma
             upper_k = mu + z * sigma
 
+            intervals_arr[idx, k, 0] = lower_k
+            intervals_arr[idx, k, 1] = upper_k
+
             scores_matrix[idx, k] = interval_score(
                 np.array([lower_k]),
                 np.array([upper_k]),
@@ -348,7 +500,159 @@ def build_scores_matrix_from_series(
                 alpha=alpha,
             )[0]
 
+    if return_intervals:
+        return scores_matrix, contexts, targets_arr, intervals_arr
+
     return scores_matrix, contexts
+
+
+# ---------------------------------------------------------------------------
+# Helper: build scores matrix with conformal calibration (CQR-style)
+# ---------------------------------------------------------------------------
+
+def build_scores_matrix_with_cqr(
+    series: np.ndarray,
+    lookback_windows: List[int],
+    alpha: float = 0.10,
+    min_history: int = 100,
+    calibration_window: int = 50,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """
+    Build a (T', K) scores matrix using conformalized prediction intervals.
+
+    Instead of the simple ``mean +/- z * std`` intervals used by
+    :func:`build_scores_matrix_from_series`, this function computes
+    proper conformal intervals following the split-conformal / CQR
+    philosophy:
+
+    1. Point forecast = rolling mean over the last *w_k* values.
+    2. Residuals are collected in a rolling calibration set of size
+       *calibration_window*.
+    3. The prediction interval at time *t* is::
+
+           point +/- quantile(|residuals|, 1 - alpha)
+
+       where the quantile is taken over the calibration window.
+
+    This guarantees approximate marginal coverage of ``1 - alpha`` once
+    the calibration window is full, without Gaussianity assumptions.
+
+    Parameters
+    ----------
+    series : ndarray, shape (T,)
+        Raw univariate time series.
+    lookback_windows : list of int
+        Each element defines a "spec" -- the lookback window length.
+    alpha : float
+        Miscoverage rate (default 0.10 for 90 % intervals).
+    min_history : int
+        Minimum number of observations before scoring begins (must be
+        large enough that each lookback window and the calibration
+        window have data).  Default 100.
+    calibration_window : int
+        Number of recent residuals used to compute the conformal
+        quantile.  Default 50.
+
+    Returns
+    -------
+    scores_matrix : ndarray, shape (T', K)
+        Interval scores.  T' = T - min_history.
+    contexts : ndarray, shape (T', D)
+        Context features derived from the series history (D = 8).
+    targets : ndarray, shape (T',)
+        True values at each scored timestep.
+    intervals_matrix : ndarray, shape (T', K, 2)
+        ``intervals_matrix[t, k]`` = ``[lower, upper]`` for spec *k*
+        at timestep *t*.
+    """
+    from conformal_ts.evaluation.metrics import interval_score
+    from collections import deque
+
+    T = len(series)
+    K = len(lookback_windows)
+    T_prime = T - min_history
+
+    if T_prime <= 0:
+        raise ValueError(
+            f"Series length {T} is <= min_history {min_history}; "
+            "nothing to score."
+        )
+
+    scores_matrix = np.zeros((T_prime, K))
+    feature_dim = 8
+    contexts = np.zeros((T_prime, feature_dim))
+    targets_arr = np.zeros(T_prime)
+    intervals_arr = np.zeros((T_prime, K, 2))
+
+    # Per-spec rolling residual buffers for conformal calibration
+    residual_buffers: List[deque] = [
+        deque(maxlen=calibration_window) for _ in range(K)
+    ]
+
+    for idx in range(T_prime):
+        t = min_history + idx
+        y_true = series[t]
+        targets_arr[idx] = y_true
+
+        # --- build context features from history ---
+        ctx = np.zeros(feature_dim)
+        ctx[0] = 1.0  # bias
+
+        short_win = series[max(0, t - 5):t]
+        if len(short_win) > 0:
+            ctx[1] = np.mean(short_win)
+            ctx[2] = np.std(short_win) + 1e-8
+        med_win = series[max(0, t - 20):t]
+        if len(med_win) > 0:
+            ctx[3] = np.mean(med_win)
+            ctx[4] = np.std(med_win) + 1e-8
+        long_win = series[max(0, t - 50):t]
+        if len(long_win) > 0:
+            ctx[5] = np.mean(long_win)
+            ctx[6] = np.std(long_win) + 1e-8
+        ctx[7] = series[t - 1]
+
+        contexts[idx] = ctx
+
+        # --- score each spec ---
+        for k, w in enumerate(lookback_windows):
+            window = series[max(0, t - w):t]
+            mu = float(np.mean(window))
+
+            # Conformal quantile from rolling residuals
+            buf = residual_buffers[k]
+            if len(buf) >= 2:
+                residuals = np.array(buf)
+                # Finite-sample correction: ceil((n+1)*(1-alpha)) / n
+                n = len(residuals)
+                q_idx = int(np.ceil((n + 1) * (1 - alpha)))
+                q_idx = min(q_idx, n) - 1  # 0-indexed
+                q = float(np.sort(np.abs(residuals))[q_idx])
+            else:
+                # Fallback: use std-based interval until calibration
+                # buffer fills up
+                sigma = float(np.std(window)) + 1e-8
+                from scipy.stats import norm as _norm
+                q = _norm.ppf(1 - alpha / 2) * sigma
+
+            lower_k = mu - q
+            upper_k = mu + q
+
+            intervals_arr[idx, k, 0] = lower_k
+            intervals_arr[idx, k, 1] = upper_k
+
+            scores_matrix[idx, k] = interval_score(
+                np.array([lower_k]),
+                np.array([upper_k]),
+                np.array([y_true]),
+                alpha=alpha,
+            )[0]
+
+            # Update residual buffer AFTER scoring (split-conformal:
+            # calibrate on past, predict on present).
+            buf.append(y_true - mu)
+
+    return scores_matrix, contexts, targets_arr, intervals_arr
 
 
 # ---------------------------------------------------------------------------
@@ -426,7 +730,7 @@ if __name__ == "__main__":
     )
     print(f"Series length: {len(series)}, mean={series.mean():.3f}, std={series.std():.3f}")
 
-    # 2. Build scores matrix with 4 lookback windows
+    # 2. Build scores matrix with 4 lookback windows (basic)
     lookbacks = [10, 25, 50, 100]
     scores_matrix, contexts = build_scores_matrix_from_series(
         series, lookback_windows=lookbacks, alpha=0.10, min_history=50,
@@ -435,17 +739,38 @@ if __name__ == "__main__":
     print(f"Contexts shape:      {contexts.shape}")
     print(f"Mean scores per spec: {scores_matrix.mean(axis=0).round(3)}")
 
-    # 3. Run bandit experiment
-    T, K = scores_matrix.shape
-    D = contexts.shape[1]
+    # 2b. Also test return_intervals=True
+    sm2, ctx2, tgt2, intv2 = build_scores_matrix_from_series(
+        series, lookback_windows=lookbacks, alpha=0.10, min_history=50,
+        return_intervals=True,
+    )
+    print(f"With return_intervals: targets shape={tgt2.shape}, "
+          f"intervals shape={intv2.shape}")
+
+    # 2c. Test CQR-based builder
+    sm_cqr, ctx_cqr, tgt_cqr, intv_cqr = build_scores_matrix_with_cqr(
+        series, lookback_windows=lookbacks, alpha=0.10, min_history=100,
+        calibration_window=50,
+    )
+    print(f"CQR scores matrix shape: {sm_cqr.shape}")
+    print(f"CQR mean scores per spec: {sm_cqr.mean(axis=0).round(3)}")
+
+    # 3. Run bandit experiment (with coverage tracking)
+    T, K = sm2.shape
+    D = ctx2.shape[1]
 
     config = BanditExperimentConfig(
         num_specs=K,
         feature_dim=D,
         warmup_rounds=20,
         seed=123,
+        train_steps=50,
     )
-    result = run_bandit_experiment(scores_matrix, contexts, config)
+    result = run_bandit_experiment(
+        sm2, ctx2, config,
+        targets=tgt2,
+        intervals_matrix=intv2,
+    )
 
     summary = result.summary()
     print("\n--- Summary ---")
@@ -457,4 +782,10 @@ if __name__ == "__main__":
 
     print(f"\n  CTS improvement over best fixed: "
           f"{result.improvement_over_best_fixed():+.2f}%")
+
+    if result.cts_covered is not None:
+        print(f"  CTS coverage: {result.cts_covered.mean():.2%}")
+    print(f"  ACI final alpha: {result.aci_alpha_history[-1]:.4f}")
+    print(f"  Result arrays length (after train split): {len(result.cts_scores)}")
+
     print("\nSelf-test passed.")

@@ -10,6 +10,7 @@ from .bandit_experiment import (
     BanditExperimentResult,
     run_bandit_experiment,
     build_scores_matrix_from_series,
+    build_scores_matrix_with_cqr,
     generate_regime_switching_series,
 )
 
@@ -20,5 +21,6 @@ __all__ = [
     'BanditExperimentResult',
     'run_bandit_experiment',
     'build_scores_matrix_from_series',
+    'build_scores_matrix_with_cqr',
     'generate_regime_switching_series',
 ]

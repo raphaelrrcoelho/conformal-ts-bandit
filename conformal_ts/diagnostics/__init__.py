@@ -460,6 +460,286 @@ def compare_datasets(
 
 
 # ---------------------------------------------------------------------------
+# Predictable Non-Stationarity Diagnostics
+# ---------------------------------------------------------------------------
+
+@dataclass
+class PredictableNonStationarityReport:
+    """
+    Container for predictable non-stationarity diagnostic metrics.
+
+    Unlike the raw NonStationarityReport which measures instability, this
+    report measures whether the *context* can predict which specification
+    is best. High predictable non-stationarity means adaptive selection
+    (CTS) can exploit structured regime shifts, whereas raw instability
+    alone may just be noise.
+
+    Attributes:
+        predictable_ns_index: Skill of context at predicting the best spec,
+            normalized so that 0 = no better than always predicting the mode,
+            1 = perfect prediction.  Clipped to [0, 1].
+        context_predictability: Raw test-set accuracy of the ridge classifier
+            mapping context features to the optimal specification.
+        spec_diversity: Normalized Shannon entropy of the optimal spec
+            distribution (reuses _compute_selection_entropy).
+            0 = one spec dominates; 1 = uniform.
+        score_gap: Mean gap between worst and best spec scores, normalized
+            by the mean score.  Captures how much picking the right spec
+            matters.
+        composite_index: Weighted combination:
+            0.5 * predictable_ns_index + 0.3 * score_gap + 0.2 * spec_diversity.
+        train_accuracy: Accuracy of the classifier on the training split
+            (first 70% of timesteps).
+        baseline_accuracy: Accuracy of always predicting the most common
+            optimal spec (majority-class baseline).
+    """
+
+    # Core metrics (all in [0, 1])
+    predictable_ns_index: float
+    context_predictability: float
+    spec_diversity: float
+    score_gap: float
+
+    # Composite
+    composite_index: float
+
+    # Classifier diagnostics
+    train_accuracy: float
+    baseline_accuracy: float
+
+    def to_dict(self) -> Dict[str, object]:
+        """Convert all fields to a plain dictionary (for serialization)."""
+        return {
+            'predictable_ns_index': self.predictable_ns_index,
+            'context_predictability': self.context_predictability,
+            'spec_diversity': self.spec_diversity,
+            'score_gap': self.score_gap,
+            'composite_index': self.composite_index,
+            'train_accuracy': self.train_accuracy,
+            'baseline_accuracy': self.baseline_accuracy,
+        }
+
+
+def _ridge_classify(
+    X_train: np.ndarray,
+    y_train: np.ndarray,
+    X_test: np.ndarray,
+    num_classes: int,
+    lam: float = 1.0,
+) -> np.ndarray:
+    """
+    One-vs-rest ridge classifier using least squares.
+
+    For each class k, fits  w_k = (X^T X + lambda * I)^{-1} X^T y_k
+    where y_k is a binary indicator vector. Prediction is argmax of the
+    scores across classes.
+
+    Args:
+        X_train: Feature matrix of shape (N_train, D).
+        y_train: Integer labels of shape (N_train,) in [0, num_classes).
+        X_test: Feature matrix of shape (N_test, D).
+        num_classes: Number of distinct classes.
+        lam: Ridge regularization parameter.
+
+    Returns:
+        Integer predicted labels of shape (N_test,).
+    """
+    N, D = X_train.shape
+
+    # Construct one-hot target matrix (N, num_classes)
+    Y = np.zeros((N, num_classes), dtype=float)
+    for k in range(num_classes):
+        Y[:, k] = (y_train == k).astype(float)
+
+    # Ridge solution: W = (X^T X + lam I)^{-1} X^T Y   shape (D, num_classes)
+    XtX = X_train.T @ X_train  # (D, D)
+    reg = lam * np.eye(D)
+    XtY = X_train.T @ Y  # (D, num_classes)
+    W = np.linalg.solve(XtX + reg, XtY)
+
+    # Predict: argmax of test scores
+    scores = X_test @ W  # (N_test, num_classes)
+    return np.argmax(scores, axis=1)
+
+
+def compute_predictable_ns_index(
+    scores_matrix: np.ndarray,
+    contexts: np.ndarray,
+    weights: Optional[np.ndarray] = None,
+) -> PredictableNonStationarityReport:
+    """
+    Compute the predictable non-stationarity index from scores and contexts.
+
+    This measures whether the context features can predict which specification
+    is optimal at each timestep.  A high index indicates structured regime
+    shifts that CTS can exploit; a low index means either no switching or
+    unpredictable switching.
+
+    Approach:
+        1. Determine optimal_specs[t] = argmin(scores_matrix[t]) for each t.
+        2. Split into train (first 70%) and test (last 30%).
+        3. Train a one-vs-rest ridge classifier mapping context -> optimal_spec.
+        4. Compute test accuracy and majority-class baseline accuracy.
+        5. predictable_ns_index = (test_acc - baseline_acc) / (1 - baseline_acc),
+           clipped to [0, 1].
+
+    Args:
+        scores_matrix: Array of shape (T, K) with interval scores (lower is
+            better).
+        contexts: Array of shape (T, D) or (T,) with context features for
+            each timestep.  If 1-D, it is reshaped to (T, 1).
+        weights: Optional array of shape (3,) giving the relative importance
+            of [predictable_ns_index, score_gap, spec_diversity] in the
+            composite.  Default: [0.5, 0.3, 0.2].
+
+    Returns:
+        PredictableNonStationarityReport with all metrics.
+
+    Raises:
+        ValueError: If shapes are incompatible or inputs are too small.
+    """
+    scores_matrix = np.asarray(scores_matrix, dtype=float)
+    contexts = np.asarray(contexts, dtype=float)
+
+    if scores_matrix.ndim != 2:
+        raise ValueError(
+            f"scores_matrix must be 2-dimensional, got shape {scores_matrix.shape}"
+        )
+
+    T, K = scores_matrix.shape
+
+    if T < 2:
+        raise ValueError(f"Need at least 2 timesteps, got T={T}")
+    if K < 1:
+        raise ValueError(f"Need at least 1 specification, got K={K}")
+
+    # Reshape contexts if 1-D
+    if contexts.ndim == 1:
+        contexts = contexts.reshape(-1, 1)
+
+    if contexts.ndim != 2 or contexts.shape[0] != T:
+        raise ValueError(
+            f"contexts must have shape (T, D) with T={T}, "
+            f"got {contexts.shape}"
+        )
+
+    # Default composite weights
+    if weights is None:
+        w = np.array([0.5, 0.3, 0.2])
+    else:
+        w = np.asarray(weights, dtype=float)
+        if w.shape != (3,):
+            raise ValueError(f"weights must have shape (3,), got {w.shape}")
+        w = w / w.sum()
+
+    # --- Step 1: Optimal specs ---
+    optimal_specs = np.argmin(scores_matrix, axis=1)  # (T,)
+
+    # --- Step 2: Train / test split (70 / 30) ---
+    split = int(T * 0.7)
+    split = max(1, min(split, T - 1))  # ensure both splits are non-empty
+
+    X_train, X_test = contexts[:split], contexts[split:]
+    y_train, y_test = optimal_specs[:split], optimal_specs[split:]
+
+    # --- Step 3: Ridge classifier ---
+    y_pred_test = _ridge_classify(X_train, y_train, X_test, num_classes=K)
+    y_pred_train = _ridge_classify(X_train, y_train, X_train, num_classes=K)
+
+    # --- Step 4: Accuracies ---
+    test_accuracy = float(np.mean(y_pred_test == y_test))
+    train_accuracy = float(np.mean(y_pred_train == y_train))
+
+    # Baseline: always predict the most common class in the *test* set
+    test_counts = np.bincount(y_test, minlength=K)
+    baseline_accuracy = float(np.max(test_counts) / len(y_test))
+
+    # --- Step 5: Predictable NS index ---
+    if baseline_accuracy >= 1.0:
+        # Only one class in the test set -- no switching to predict
+        predictable_ns = 0.0
+    else:
+        predictable_ns = (test_accuracy - baseline_accuracy) / (1.0 - baseline_accuracy)
+        predictable_ns = float(np.clip(predictable_ns, 0.0, 1.0))
+
+    # --- Sub-components ---
+    # Spec diversity: reuse existing entropy computation
+    spec_diversity = _compute_selection_entropy(optimal_specs, K)
+
+    # Score gap: mean (worst - best) / mean_score
+    best_per_t = np.min(scores_matrix, axis=1)
+    worst_per_t = np.max(scores_matrix, axis=1)
+    mean_score = np.mean(scores_matrix)
+    if mean_score > 0:
+        score_gap = float(np.mean(worst_per_t - best_per_t) / mean_score)
+    else:
+        score_gap = 0.0
+    # Clip score_gap to [0, 1] for the composite
+    score_gap_clipped = float(np.clip(score_gap, 0.0, 1.0))
+
+    # --- Composite ---
+    composite = float(
+        w[0] * predictable_ns
+        + w[1] * score_gap_clipped
+        + w[2] * spec_diversity
+    )
+
+    return PredictableNonStationarityReport(
+        predictable_ns_index=predictable_ns,
+        context_predictability=test_accuracy,
+        spec_diversity=spec_diversity,
+        score_gap=score_gap,
+        composite_index=composite,
+        train_accuracy=train_accuracy,
+        baseline_accuracy=baseline_accuracy,
+    )
+
+
+def compare_datasets_predictable(
+    reports: Dict[str, PredictableNonStationarityReport],
+) -> "pd.DataFrame":
+    """
+    Create a comparison table of predictable NS diagnostics across datasets.
+
+    Each row corresponds to one dataset; columns include the predictable NS
+    index, its sub-components, and the composite index.
+
+    Args:
+        reports: Dictionary mapping dataset name to its
+            PredictableNonStationarityReport.
+
+    Returns:
+        pandas DataFrame with one row per dataset, sorted by composite_index
+        descending.
+
+    Raises:
+        ImportError: If pandas is not installed.
+    """
+    if not _HAS_PANDAS:
+        raise ImportError(
+            "pandas is required for compare_datasets_predictable(). "
+            "Install it with: pip install pandas"
+        )
+
+    rows = []
+    for name, report in reports.items():
+        rows.append({
+            'dataset': name,
+            'predictable_ns': report.predictable_ns_index,
+            'context_pred': report.context_predictability,
+            'spec_diversity': report.spec_diversity,
+            'score_gap': report.score_gap,
+            'composite': report.composite_index,
+            'train_acc': report.train_accuracy,
+            'baseline_acc': report.baseline_accuracy,
+        })
+
+    df = pd.DataFrame(rows)
+    df = df.sort_values('composite', ascending=False).reset_index(drop=True)
+    return df
+
+
+# ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
 
@@ -468,6 +748,9 @@ __all__ = [
     'compute_nonstationarity_index',
     'diagnostic_summary',
     'compare_datasets',
+    'PredictableNonStationarityReport',
+    'compute_predictable_ns_index',
+    'compare_datasets_predictable',
 ]
 
 
@@ -517,3 +800,68 @@ if __name__ == "__main__":
         print(df.to_string(index=False))
     except ImportError:
         print("(pandas not available, skipping compare_datasets test)")
+
+    # --- Test 5: Predictable NS -- regime-switching with informative context ---
+    print("\n")
+    print("=" * 64)
+    print("  Predictable Non-Stationarity Tests")
+    print("=" * 64)
+
+    # Build a regime-switching scenario driven by an observable context signal.
+    # The context feature x cycles through [0, 1] repeatedly; the optimal spec
+    # depends on which quadrant x falls into.
+    x_ctx = np.linspace(0, 4, T, endpoint=False) % 1.0  # cycles 0->1 four times
+    scores_multi = np.random.rand(T, K) * 2 + 5  # baseline noise
+    for k in range(K):
+        # Each spec is best when x is in [k/K, (k+1)/K)
+        mask = (x_ctx >= k / K) & (x_ctx < (k + 1) / K)
+        scores_multi[mask, k] = 0.5
+
+    # Context: the signal itself plus polynomial features (linear classifier
+    # can learn thresholds via polynomial expansion)
+    ctx_regime = np.column_stack([
+        x_ctx,
+        x_ctx ** 2,
+        x_ctx ** 3,
+        np.sin(2 * np.pi * x_ctx),
+        np.cos(2 * np.pi * x_ctx),
+    ])
+    pred_report_regime = compute_predictable_ns_index(scores_multi, ctx_regime)
+    print(f"\n  Regime-Switching (informative context):")
+    print(f"    predictable_ns_index = {pred_report_regime.predictable_ns_index:.4f}")
+    print(f"    context_predictability = {pred_report_regime.context_predictability:.4f}")
+    print(f"    spec_diversity         = {pred_report_regime.spec_diversity:.4f}")
+    print(f"    score_gap              = {pred_report_regime.score_gap:.4f}")
+    print(f"    composite_index        = {pred_report_regime.composite_index:.4f}")
+    print(f"    train_accuracy         = {pred_report_regime.train_accuracy:.4f}")
+    print(f"    baseline_accuracy      = {pred_report_regime.baseline_accuracy:.4f}")
+
+    # --- Test 6: Predictable NS -- chaotic with random context ---
+    ctx_chaotic = np.random.randn(T, 5)
+    pred_report_chaotic = compute_predictable_ns_index(scores_chaotic, ctx_chaotic)
+    print(f"\n  Chaotic (random context):")
+    print(f"    predictable_ns_index = {pred_report_chaotic.predictable_ns_index:.4f}")
+    print(f"    composite_index      = {pred_report_chaotic.composite_index:.4f}")
+
+    # --- Test 7: Predictable NS -- stationary (no switching) ---
+    ctx_stationary = np.random.randn(T, 3)
+    pred_report_stationary = compute_predictable_ns_index(base_scores, ctx_stationary)
+    print(f"\n  Stationary (no switching):")
+    print(f"    predictable_ns_index = {pred_report_stationary.predictable_ns_index:.4f}")
+    print(f"    composite_index      = {pred_report_stationary.composite_index:.4f}")
+
+    # --- Test 8: Cross-dataset predictable comparison ---
+    pred_reports = {
+        'Stationary': pred_report_stationary,
+        'Regime-Switching': pred_report_regime,
+        'Chaotic': pred_report_chaotic,
+    }
+    try:
+        df_pred = compare_datasets_predictable(pred_reports)
+        print("\n  Predictable NS Cross-Dataset Comparison:")
+        print(df_pred.to_string(index=False))
+    except ImportError:
+        print("(pandas not available, skipping compare_datasets_predictable test)")
+
+    print()
+    print("  to_dict():", pred_report_regime.to_dict())

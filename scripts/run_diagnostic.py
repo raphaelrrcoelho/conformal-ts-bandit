@@ -79,7 +79,7 @@ class DatasetResult:
     dataset_name: str
     nonstationarity_index: float = 0.0
     cts_mean_score: float = 0.0
-    fixed_mean_score: float = 0.0
+    fixed_mean_score: float = 0.0          # CV-Fixed baseline (primary)
     ensemble_mean_score: float = 0.0
     random_mean_score: float = 0.0
     cts_coverage: float = 0.0
@@ -88,6 +88,10 @@ class DatasetResult:
     n_steps: int = 0
     elapsed_seconds: float = 0.0
     nonstationarity_details: Dict[str, float] = field(default_factory=dict)
+
+    # New baselines
+    aci_mean_score: float = 0.0
+    best_fixed_mean_score: float = 0.0     # Best single spec in hindsight
 
     # Multi-seed confidence intervals and significance (None when n_seeds == 1)
     cts_score_ci: Optional[Tuple[float, float]] = None
@@ -110,30 +114,23 @@ def _run_synthetic_experiment(
     """
     Run CTS + baselines on synthetic data with a given regime persistence.
 
-    Generates a regime-switching time series, builds a (T', K) scores
-    matrix via rolling-window forecasters with different lookback windows,
-    and then runs the bandit competition on that scores matrix.  The
-    interval-score differences between specs emerge naturally from the
-    forecasting pipeline rather than being hand-crafted.
-
-    Returns dict with per-step scores for each method, the per-step
-    optimal specification array, and the full (T, K) scores matrix for
-    non-stationarity diagnostics.
+    Uses CQR-based conformal intervals, a proper train/test split, and
+    returns scores for all baselines including CV-Fixed and ACI.
     """
     from conformal_ts.experiments.bandit_experiment import (
         BanditExperimentConfig,
-        build_scores_matrix_from_series,
+        build_scores_matrix_with_cqr,
         generate_regime_switching_series,
         run_bandit_experiment,
     )
 
     lookback_windows = [10, 25, 50, 100]
     num_specs = len(lookback_windows)
-    min_history = 50
+    min_history = 100
+    train_steps = 50
 
-    # Need enough raw data so that after removing min_history we still
-    # have n_steps scored timesteps.
-    total_len = n_steps + min_history
+    # Extra data for min_history + train warmup + evaluation steps
+    total_len = n_steps + min_history + train_steps
 
     # 1. Generate a raw regime-switching time series
     series = generate_regime_switching_series(
@@ -143,17 +140,18 @@ def _run_synthetic_experiment(
         seed=seed,
     )
 
-    # 2. Build the scores matrix from the real rolling-window forecaster
-    scores_matrix, contexts = build_scores_matrix_from_series(
+    # 2. Build scores matrix with CQR-based conformal intervals
+    scores_matrix, contexts, targets, intervals = build_scores_matrix_with_cqr(
         series,
         lookback_windows=lookback_windows,
         alpha=0.10,
         min_history=min_history,
+        calibration_window=50,
     )
 
     feature_dim = contexts.shape[1]
 
-    # 3. Run the bandit competition
+    # 3. Run the bandit competition with train/test split and coverage
     config = BanditExperimentConfig(
         num_specs=num_specs,
         feature_dim=feature_dim,
@@ -161,23 +159,36 @@ def _run_synthetic_experiment(
         exploration_variance=5.0,
         prior_precision=0.1,
         seed=seed,
+        train_steps=train_steps,
+        cv_window=50,
     )
-    result = run_bandit_experiment(scores_matrix, contexts, config)
+    result = run_bandit_experiment(
+        scores_matrix, contexts, config,
+        targets=targets, intervals_matrix=intervals,
+    )
 
-    # 4. Return in the same format expected by downstream code.
-    #    "fixed_scores" uses random (no-information baseline), not
-    #    best-in-hindsight which is unfairly strong.
-    return {
+    return _build_result_dict(result, num_specs)
+
+
+def _build_result_dict(result, num_specs: int) -> Dict[str, Any]:
+    """Convert BanditExperimentResult to the dict format used downstream."""
+    d = {
         "cts_scores": result.cts_scores,
-        "fixed_scores": result.random_scores,
+        "fixed_scores": result.cv_fixed_scores,  # CV-Fixed is the primary baseline
         "ensemble_scores": result.ensemble_scores,
         "random_scores": result.random_scores,
         "optimal_specs": result.optimal_specs,
         "scores_matrix": result.scores_matrix,
+        "contexts": result.contexts,
         "num_specs": num_specs,
         "oracle_scores": result.oracle_scores,
+        "cv_fixed_scores": result.cv_fixed_scores,
+        "aci_scores": result.aci_scores,
         "best_fixed_scores": result.best_fixed_scores(),
     }
+    if result.cts_covered is not None:
+        d["cts_covered"] = result.cts_covered
+    return d
 
 
 def _run_gefcom_experiment(
@@ -260,7 +271,8 @@ def _run_gefcom_experiment(
                 np.array([lower_k]), np.array([upper_k]), np.array([target_val])
             )[0]
 
-    # --- Run the bandit competition ---
+    # --- Run the bandit competition with train/test split ---
+    train_steps = min(50, actual_steps // 5)
     config = BanditExperimentConfig(
         num_specs=num_specs,
         feature_dim=feature_dim,
@@ -268,20 +280,12 @@ def _run_gefcom_experiment(
         exploration_variance=5.0,
         prior_precision=0.1,
         seed=seed,
+        train_steps=train_steps,
+        cv_window=50,
     )
     result = run_bandit_experiment(scores_matrix, contexts, config)
 
-    return {
-        "cts_scores": result.cts_scores,
-        "fixed_scores": result.random_scores,
-        "ensemble_scores": result.ensemble_scores,
-        "random_scores": result.random_scores,
-        "optimal_specs": result.optimal_specs,
-        "scores_matrix": result.scores_matrix,
-        "num_specs": num_specs,
-        "oracle_scores": result.oracle_scores,
-        "best_fixed_scores": result.best_fixed_scores(),
-    }
+    return _build_result_dict(result, num_specs)
 
 
 # ---------------------------------------------------------------------------
@@ -292,39 +296,50 @@ def compute_nonstationarity(
     optimal_specs: np.ndarray,
     num_specs: int,
     scores_matrix: Optional[np.ndarray] = None,
+    contexts: Optional[np.ndarray] = None,
 ) -> Dict[str, float]:
     """
-    Compute composite non-stationarity index.
+    Compute non-stationarity index.
 
-    Uses the full (T, K) scores_matrix when available (much richer signal
-    than the optimal-spec sequence alone).  Falls back to a self-contained
-    implementation from the optimal-spec sequence if the diagnostics
-    module is not importable.
+    When contexts are available, uses the predictable NS index (how well
+    context predicts the best spec).  Otherwise falls back to the raw NS
+    index.
     """
+    result_dict: Dict[str, float] = {}
+
+    # Try predictable NS index first (requires contexts)
+    if contexts is not None and scores_matrix is not None:
+        try:
+            from conformal_ts.diagnostics import compute_predictable_ns_index
+            pns = compute_predictable_ns_index(scores_matrix, contexts)
+            result_dict["composite_index"] = pns.composite_index
+            result_dict["predictable_ns"] = pns.predictable_ns_index
+            result_dict["context_predictability"] = pns.context_predictability
+            result_dict["score_gap"] = pns.score_gap
+            result_dict["spec_diversity"] = pns.spec_diversity
+            return result_dict
+        except (ImportError, Exception) as e:
+            logger.debug(f"Predictable NS failed, falling back to raw: {e}")
+
+    # Fallback to raw NS index
     try:
         from conformal_ts.diagnostics import compute_nonstationarity_index, NonStationarityReport
 
         if scores_matrix is not None:
             sm = scores_matrix
         else:
-            # Build a proxy (T, K) matrix from optimal_specs
             n = len(optimal_specs)
             sm = np.ones((n, num_specs))
             for t in range(n):
-                sm[t, optimal_specs[t]] = 0.0  # lower is better
+                sm[t, optimal_specs[t]] = 0.0
 
-        result = compute_nonstationarity_index(sm)
-        if isinstance(result, NonStationarityReport):
-            return {
-                "composite_index": result.composite_index,
-                "switch_frequency": getattr(result, "switch_frequency", 0.0),
-                "selection_entropy": getattr(result, "selection_entropy", 0.0),
-                "performance_spread": getattr(result, "performance_spread", 0.0),
-            }
-        elif isinstance(result, dict):
-            return result
-        else:
-            return {"composite_index": float(result)}
+        raw = compute_nonstationarity_index(sm)
+        if isinstance(raw, NonStationarityReport):
+            result_dict["composite_index"] = raw.composite_index
+            result_dict["switch_frequency"] = getattr(raw, "switch_frequency", 0.0)
+            result_dict["selection_entropy"] = getattr(raw, "selection_entropy", 0.0)
+            result_dict["performance_spread"] = getattr(raw, "performance_spread", 0.0)
+        return result_dict
 
     except ImportError:
         return _compute_nonstationarity_fallback(optimal_specs, num_specs)
@@ -378,7 +393,8 @@ def _run_real_dataset_experiment(
     Run CTS + baselines on a real dataset from the RealDatasetLoader.
 
     Downloads/caches the dataset, builds the scores matrix from real
-    rolling-window forecasters, then delegates to run_bandit_experiment.
+    rolling-window forecasters, then delegates to run_bandit_experiment
+    with train/test split and all baselines (CV-Fixed, ACI, etc.).
     """
     from conformal_ts.data.real_datasets import RealDatasetLoader
     from conformal_ts.experiments.bandit_experiment import (
@@ -401,6 +417,7 @@ def _run_real_dataset_experiment(
 
     num_specs = scores_matrix.shape[1]
     feature_dim = contexts.shape[1]
+    train_steps = min(50, scores_matrix.shape[0] // 5)
 
     config = BanditExperimentConfig(
         num_specs=num_specs,
@@ -409,20 +426,12 @@ def _run_real_dataset_experiment(
         exploration_variance=5.0,
         prior_precision=0.1,
         seed=seed,
+        train_steps=train_steps,
+        cv_window=50,
     )
     result = run_bandit_experiment(scores_matrix, contexts, config)
 
-    return {
-        "cts_scores": result.cts_scores,
-        "fixed_scores": result.random_scores,
-        "ensemble_scores": result.ensemble_scores,
-        "random_scores": result.random_scores,
-        "optimal_specs": result.optimal_specs,
-        "scores_matrix": result.scores_matrix,
-        "num_specs": num_specs,
-        "oracle_scores": result.oracle_scores,
-        "best_fixed_scores": result.best_fixed_scores(),
-    }
+    return _build_result_dict(result, num_specs)
 
 
 def _dispatch_experiment(
@@ -459,10 +468,11 @@ def run_single_dataset(
     raw = _dispatch_experiment(dataset_name, n_steps, seed)
     elapsed = time.perf_counter() - t0
 
-    # Compute non-stationarity
+    # Compute non-stationarity (with contexts for predictable NS when available)
     ns = compute_nonstationarity(
         raw["optimal_specs"], raw["num_specs"],
         scores_matrix=raw.get("scores_matrix"),
+        contexts=raw.get("contexts"),
     )
 
     # Mean scores
@@ -470,6 +480,12 @@ def run_single_dataset(
     fixed_mean = float(np.mean(raw["fixed_scores"])) if len(raw["fixed_scores"]) > 0 else 0.0
     ens_mean = float(np.mean(raw["ensemble_scores"])) if len(raw["ensemble_scores"]) > 0 else 0.0
     rand_mean = float(np.mean(raw["random_scores"])) if len(raw["random_scores"]) > 0 else 0.0
+    aci_mean = float(np.mean(raw.get("aci_scores", [0.0])))
+    best_fixed_mean = float(np.mean(raw.get("best_fixed_scores", raw["fixed_scores"])))
+
+    # Coverage
+    covered = raw.get("cts_covered")
+    coverage = float(np.mean(covered)) if covered is not None else 0.0
 
     # Improvement percentages (lower score is better)
     imp_fixed = 100.0 * (fixed_mean - cts_mean) / (fixed_mean + 1e-12)
@@ -482,18 +498,20 @@ def run_single_dataset(
         fixed_mean_score=fixed_mean,
         ensemble_mean_score=ens_mean,
         random_mean_score=rand_mean,
-        cts_coverage=0.0,  # would need separate tracking
+        cts_coverage=coverage,
         improvement_over_fixed_pct=imp_fixed,
         improvement_over_ensemble_pct=imp_ens,
         n_steps=len(raw["cts_scores"]),
         elapsed_seconds=elapsed,
         nonstationarity_details=ns,
+        aci_mean_score=aci_mean,
+        best_fixed_mean_score=best_fixed_mean,
         n_seeds=1,
     )
 
     logger.info(
         f"  {dataset_name}: NS_index={ns['composite_index']:.3f}  "
-        f"CTS={cts_mean:.3f}  Fixed={fixed_mean:.3f}  "
+        f"CTS={cts_mean:.3f}  CV-Fixed={fixed_mean:.3f}  "
         f"Imp={imp_fixed:+.1f}%  ({elapsed:.1f}s)"
     )
 
@@ -640,6 +658,9 @@ def run_dataset_multi_seed(
     per_seed_fixed_means: List[float] = []
     per_seed_ens_means: List[float] = []
     per_seed_rand_means: List[float] = []
+    per_seed_aci_means: List[float] = []
+    per_seed_best_fixed_means: List[float] = []
+    per_seed_coverage: List[float] = []
     per_seed_ns: List[float] = []
     per_seed_imp: List[float] = []
     ns_details_accum: Dict[str, List[float]] = {}
@@ -659,11 +680,19 @@ def run_dataset_multi_seed(
         fixed_m = float(np.mean(raw["fixed_scores"])) if len(raw["fixed_scores"]) > 0 else 0.0
         ens_m = float(np.mean(raw["ensemble_scores"])) if len(raw["ensemble_scores"]) > 0 else 0.0
         rand_m = float(np.mean(raw["random_scores"])) if len(raw["random_scores"]) > 0 else 0.0
+        aci_m = float(np.mean(raw.get("aci_scores", [0.0])))
+        best_fixed_m = float(np.mean(raw.get("best_fixed_scores", raw["fixed_scores"])))
 
         per_seed_cts_means.append(cts_m)
         per_seed_fixed_means.append(fixed_m)
         per_seed_ens_means.append(ens_m)
         per_seed_rand_means.append(rand_m)
+        per_seed_aci_means.append(aci_m)
+        per_seed_best_fixed_means.append(best_fixed_m)
+
+        # Coverage
+        covered = raw.get("cts_covered")
+        per_seed_coverage.append(float(np.mean(covered)) if covered is not None else 0.0)
 
         imp = 100.0 * (fixed_m - cts_m) / (fixed_m + 1e-12)
         per_seed_imp.append(imp)
@@ -672,10 +701,11 @@ def run_dataset_multi_seed(
         all_cts_scores.append(raw["cts_scores"])
         all_fixed_scores.append(raw["fixed_scores"])
 
-        # Non-stationarity
+        # Non-stationarity (with contexts for predictable NS)
         ns = compute_nonstationarity(
             raw["optimal_specs"], raw["num_specs"],
             scores_matrix=raw.get("scores_matrix"),
+            contexts=raw.get("contexts"),
         )
         per_seed_ns.append(ns["composite_index"])
         for k, v in ns.items():
@@ -688,6 +718,9 @@ def run_dataset_multi_seed(
     fixed_mean = float(np.mean(per_seed_fixed_means))
     ens_mean = float(np.mean(per_seed_ens_means))
     rand_mean = float(np.mean(per_seed_rand_means))
+    aci_mean = float(np.mean(per_seed_aci_means))
+    best_fixed_mean = float(np.mean(per_seed_best_fixed_means))
+    coverage_mean = float(np.mean(per_seed_coverage))
     imp_fixed = float(np.mean(per_seed_imp))
     imp_ens = 100.0 * (ens_mean - cts_mean) / (ens_mean + 1e-12)
     ns_index = float(np.mean(per_seed_ns))
@@ -716,12 +749,14 @@ def run_dataset_multi_seed(
         fixed_mean_score=fixed_mean,
         ensemble_mean_score=ens_mean,
         random_mean_score=rand_mean,
-        cts_coverage=0.0,
+        cts_coverage=coverage_mean,
         improvement_over_fixed_pct=imp_fixed,
         improvement_over_ensemble_pct=imp_ens,
         n_steps=len(all_cts_scores[0]) if all_cts_scores else 0,
         elapsed_seconds=elapsed,
         nonstationarity_details=ns_details_mean,
+        aci_mean_score=aci_mean,
+        best_fixed_mean_score=best_fixed_mean,
         cts_score_ci=cts_ci,
         fixed_score_ci=fixed_ci,
         improvement_ci=imp_ci,
@@ -734,9 +769,9 @@ def run_dataset_multi_seed(
     logger.info(
         f"  {dataset_name}: NS_index={ns_index:.3f}  "
         f"CTS={cts_mean:.3f} ({cts_ci[0]:.3f}, {cts_ci[1]:.3f})  "
-        f"Fixed={fixed_mean:.3f} ({fixed_ci[0]:.3f}, {fixed_ci[1]:.3f})  "
+        f"CV-Fixed={fixed_mean:.3f} ({fixed_ci[0]:.3f}, {fixed_ci[1]:.3f})  "
         f"Imp={imp_fixed:+.1f}%{stars}  DM p={dm_pval:.4f}  "
-        f"({elapsed:.1f}s, {n_seeds} seeds)"
+        f"Cov={coverage_mean:.1%}  ({elapsed:.1f}s, {n_seeds} seeds)"
     )
 
     return result
@@ -787,17 +822,25 @@ def _fmt_score_ci(mean: float, ci: Optional[Tuple[float, float]]) -> str:
 def print_summary_table(results: List[DatasetResult], correlation: Dict[str, Any]):
     """Print a formatted summary table to stdout."""
     has_ci = any(r.cts_score_ci is not None for r in results)
+    has_coverage = any(r.cts_coverage > 0 for r in results)
 
     if has_ci:
         header = (
-            f"{'Dataset':<20s} {'NS Index':>8s} {'CTS (95% CI)':>22s} "
-            f"{'Random (95% CI)':>22s} {'Imp':>10s} {'DM p':>8s}"
+            f"{'Dataset':<18s} {'NS':>6s} "
+            f"{'CTS (95% CI)':>22s} "
+            f"{'CV-Fixed (95% CI)':>22s} "
+            f"{'ACI':>9s} "
+            f"{'Imp%':>10s} {'DM p':>8s}"
         )
+        if has_coverage:
+            header += f" {'Cov':>6s}"
     else:
         header = (
-            f"{'Dataset':<20s} {'NS Index':>8s} {'CTS':>9s} {'Random':>9s} "
-            f"{'Ensemble':>9s} {'Imp(Rand)':>11s} {'Steps':>6s} {'Time':>6s}"
+            f"{'Dataset':<18s} {'NS':>6s} {'CTS':>9s} {'CV-Fixed':>9s} "
+            f"{'ACI':>9s} {'Ensemble':>9s} {'Imp%':>10s} {'Steps':>6s} {'Time':>6s}"
         )
+        if has_coverage:
+            header += f" {'Cov':>6s}"
 
     sep = "-" * len(header)
 
@@ -807,6 +850,7 @@ def print_summary_table(results: List[DatasetResult], correlation: Dict[str, Any
     if has_ci:
         n_seeds = results[0].n_seeds if results else 0
         print(f"  ({n_seeds} seeds per dataset, 95% bootstrap CIs)")
+    print(f"  Baseline: CV-Fixed (rolling cross-validated best spec)")
     print("=" * len(header))
     print(header)
     print(sep)
@@ -822,25 +866,33 @@ def print_summary_table(results: List[DatasetResult], correlation: Dict[str, Any
 
             dm_p_str = f"{r.dm_pvalue:.3f}" if r.dm_pvalue is not None else "N/A"
 
-            print(
-                f"{r.dataset_name:<20s} "
-                f"{r.nonstationarity_index:>8.3f} "
+            line = (
+                f"{r.dataset_name:<18s} "
+                f"{r.nonstationarity_index:>6.3f} "
                 f"{cts_str:>22s} "
                 f"{fixed_str:>22s} "
+                f"{r.aci_mean_score:>9.3f} "
                 f"{imp_str:>10s} "
                 f"{dm_p_str:>8s}"
             )
+            if has_coverage:
+                line += f" {r.cts_coverage:>5.1%}"
+            print(line)
         else:
-            print(
-                f"{r.dataset_name:<20s} "
-                f"{r.nonstationarity_index:>8.3f} "
+            line = (
+                f"{r.dataset_name:<18s} "
+                f"{r.nonstationarity_index:>6.3f} "
                 f"{r.cts_mean_score:>9.3f} "
                 f"{r.fixed_mean_score:>9.3f} "
+                f"{r.aci_mean_score:>9.3f} "
                 f"{r.ensemble_mean_score:>9.3f} "
                 f"{r.improvement_over_fixed_pct:>+10.1f}% "
                 f"{r.n_steps:>6d} "
                 f"{r.elapsed_seconds:>5.1f}s"
             )
+            if has_coverage:
+                line += f" {r.cts_coverage:>5.1%}"
+            print(line)
 
     print(sep)
 
@@ -850,7 +902,7 @@ def print_summary_table(results: List[DatasetResult], correlation: Dict[str, Any
         print()
 
     print()
-    print("Correlation (NS Index vs CTS Improvement over Fixed):")
+    print("Correlation (NS Index vs CTS Improvement over CV-Fixed):")
     print(f"  Pearson  r = {correlation.get('pearson_r', float('nan')):.3f}  "
           f"(p = {correlation.get('pearson_p', float('nan')):.4f})")
     print(f"  Spearman r = {correlation.get('spearman_r', float('nan')):.3f}  "

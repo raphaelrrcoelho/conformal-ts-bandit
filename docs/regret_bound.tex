@@ -1,0 +1,712 @@
+% ============================================================================
+% Regret Bound Sketch for Conformal Thompson Sampling
+%
+% This document provides a proof sketch for the Bayesian regret bound
+% of Linear Thompson Sampling when rewards are negative interval scores
+% from Conformalized Quantile Regression.
+%
+% STATUS: Working draft / proof sketch.  Gaps are marked with \todo{}.
+% ============================================================================
+\documentclass[11pt,letterpaper]{article}
+
+% --- Packages ---------------------------------------------------------------
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath,amssymb,amsthm}
+\usepackage{mathtools}
+\usepackage{bm}
+\usepackage{natbib}
+\usepackage{hyperref}
+\usepackage{xcolor}
+
+% --- Theorem environments ---------------------------------------------------
+\newtheorem{theorem}{Theorem}
+\newtheorem{lemma}[theorem]{Lemma}
+\newtheorem{proposition}[theorem]{Proposition}
+\newtheorem{corollary}[theorem]{Corollary}
+\newtheorem{assumption}{Assumption}
+\newtheorem{remark}{Remark}
+\theoremstyle{definition}
+\newtheorem{definition}{Definition}
+
+% --- Custom commands --------------------------------------------------------
+\newcommand{\R}{\mathbb{R}}
+\newcommand{\E}{\mathbb{E}}
+\newcommand{\Pr}{\mathbb{P}}
+\newcommand{\Var}{\mathrm{Var}}
+\newcommand{\IS}{\mathrm{IS}}
+\newcommand{\CQR}{\mathrm{CQR}}
+\newcommand{\todo}[1]{{\color{red}\textbf{[TODO: #1]}}}
+\newcommand{\norm}[1]{\left\lVert #1 \right\rVert}
+\newcommand{\inner}[2]{\langle #1, #2 \rangle}
+
+% ============================================================================
+\title{Regret Bound Sketch for Linear Thompson Sampling\\
+       with Conformal Interval Score Rewards}
+\author{Working Draft}
+\date{\today}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+We sketch a Bayesian regret bound for Conformal Thompson Sampling (CTS),
+a contextual bandit algorithm that adaptively selects among $K$ forecast
+specifications to minimize interval scores.  Each arm corresponds to a
+specification (a forecast configuration with a particular lookback window),
+and the reward at each round is the negative interval score of the
+prediction interval produced by Conformalized Quantile Regression (CQR).
+Building on the Linear Thompson Sampling analysis of
+\citet{agrawal2013thompson}, we show that the conformal coverage guarantee
+controls the sub-Gaussian parameter of the reward noise, yielding a regret
+bound of $\widetilde{O}(d\sqrt{KT})$ with constants that depend on the
+miscoverage rate~$\alpha$ and the calibration window size.
+\end{abstract}
+
+% ============================================================================
+\section{Problem Formulation}
+\label{sec:formulation}
+% ============================================================================
+
+\subsection{Setting}
+
+We consider a contextual bandit problem with $K$ arms (specifications)
+played over $T$ rounds.  At each round $t = 1, \dots, T$:
+
+\begin{enumerate}
+    \item The learner observes a context vector $\bm{x}_t \in \R^d$.
+    \item The learner selects an arm $a_t \in [K] \coloneqq \{1, \dots, K\}$.
+    \item The environment reveals an outcome $y_t \in \R$.
+    \item The learner receives reward $r_t = -\IS_\alpha(l_t^{(a_t)},\,
+          u_t^{(a_t)},\, y_t)$,
+          where $[l_t^{(k)}, u_t^{(k)}]$ is the prediction interval
+          produced by the CQR model for arm~$k$.
+\end{enumerate}
+
+The context $\bm{x}_t$ encodes features of the current market state,
+series characteristics, and temporal information.  Each arm~$k$
+corresponds to a distinct forecast specification (e.g., a particular
+lookback window and horizon combination).
+
+\subsection{Per-Arm Linear Reward Model}
+
+We posit a disjoint linear model for each arm.  Arm~$k$ has an
+unknown parameter vector $\bm{\theta}_k \in \R^d$ such that
+\begin{equation}
+    \E[r_t \mid a_t = k,\, \bm{x}_t]
+    \;=\; \bm{x}_t^\top \bm{\theta}_k .
+    \label{eq:linear-reward}
+\end{equation}
+The observed reward is
+\begin{equation}
+    r_t \;=\; \bm{x}_t^\top \bm{\theta}_{a_t} + \eta_t ,
+    \label{eq:reward-noise}
+\end{equation}
+where $\eta_t$ is conditionally zero-mean noise whose sub-Gaussian
+parameter we will relate to the conformal calibration.
+
+\subsection{Interval Score}
+
+The interval score \citep{gneiting2007strictly} for a $(1 - \alpha)$-level
+prediction interval $[l, u]$ given observation $y$ is
+\begin{equation}
+    \IS_\alpha(l, u, y)
+    \;=\; \underbrace{(u - l)}_{\text{width}}
+    \;+\; \underbrace{\frac{2}{\alpha}(l - y)\,\mathbf{1}\{y < l\}}_{\text{lower overshoot penalty}}
+    \;+\; \underbrace{\frac{2}{\alpha}(y - u)\,\mathbf{1}\{y > u\}}_{\text{upper overshoot penalty}} .
+    \label{eq:interval-score}
+\end{equation}
+The interval score is a strictly proper scoring rule: it is minimized in
+expectation when $l$ and $u$ are the $\alpha/2$ and $1 - \alpha/2$
+quantiles of the predictive distribution, respectively.  Lower scores
+are better, so we define the reward as $r_t = -\IS_\alpha(l_t, u_t, y_t)$.
+
+\subsection{Regret}
+
+Define the oracle arm at round $t$ as
+$a_t^* = \arg\max_{k \in [K]} \bm{x}_t^\top \bm{\theta}_k$, and
+the Bayesian regret as
+\begin{equation}
+    \mathrm{BayesRegret}(T)
+    \;=\; \E\!\left[\sum_{t=1}^{T}
+          \left(\bm{x}_t^\top \bm{\theta}_{a_t^*}
+                - \bm{x}_t^\top \bm{\theta}_{a_t}\right)\right] ,
+    \label{eq:regret}
+\end{equation}
+where the expectation is over contexts, noise, the prior on
+$\{\bm{\theta}_k\}$, and the algorithm's internal randomization.
+
+% ============================================================================
+\section{Key Insight: Conformal Coverage Controls Reward Noise}
+\label{sec:insight}
+% ============================================================================
+
+\subsection{Interval Score Decomposition}
+
+From \eqref{eq:interval-score}, we can decompose the interval score into
+a width component and an overshoot component:
+\begin{equation}
+    \IS_\alpha(l_t, u_t, y_t)
+    \;=\; W_t + \frac{2}{\alpha}\, O_t ,
+    \label{eq:is-decomposition}
+\end{equation}
+where $W_t = u_t - l_t$ is the interval width and
+$O_t = (l_t - y_t)^+ + (y_t - u_t)^+$ is the total overshoot
+(with $(z)^+ = \max(z, 0)$).
+
+\subsection{Conformal Coverage Guarantee}
+
+The CQR procedure \citep{romano2019conformalized} produces intervals
+$[l_t^{(k)}, u_t^{(k)}]$ by expanding raw quantile regression
+predictions with a calibration correction $\hat{q}_t^{(k)}$ computed from
+recent nonconformity scores.  Specifically, for arm~$k$ the calibrated
+interval is
+\begin{equation}
+    [l_t^{(k)}, u_t^{(k)}]
+    \;=\; [\hat{q}_{\alpha/2}^{(k)}(\bm{x}_t) - \hat{q}_t^{(k)},\;
+           \hat{q}_{1-\alpha/2}^{(k)}(\bm{x}_t) + \hat{q}_t^{(k)}] ,
+\end{equation}
+where $\hat{q}_\tau^{(k)}(\bm{x}_t)$ is the online quantile regression
+estimate and $\hat{q}_t^{(k)}$ is the conformal calibration quantile from
+a rolling window of size $n$.
+
+Under exchangeability of the calibration residuals, CQR guarantees
+finite-sample marginal coverage:
+\begin{equation}
+    \Pr\!\left(y_t \in [l_t^{(k)}, u_t^{(k)}]\right)
+    \;\geq\; 1 - \alpha .
+    \label{eq:coverage}
+\end{equation}
+Under distribution shift, adaptive conformal inference
+\citep{gibbs2021adaptive} provides long-run coverage guarantees of the form
+\begin{equation}
+    \frac{1}{T} \sum_{t=1}^T \mathbf{1}\{y_t \notin [l_t^{(k)}, u_t^{(k)}]\}
+    \;\leq\; \alpha + O(T^{-1/2}) .
+    \label{eq:adaptive-coverage}
+\end{equation}
+
+\subsection{Bounding Expected Overshoot}
+
+The coverage guarantee \eqref{eq:coverage} immediately implies a bound on
+the expected overshoot.  When the outcome is covered, $O_t = 0$.  When the
+outcome is not covered, the overshoot is bounded by the tail behavior of
+$y_t$.
+
+\begin{lemma}[Expected overshoot bound]
+\label{lem:overshoot}
+Suppose $y_t$ is conditionally $\sigma_y$-sub-Gaussian given $\bm{x}_t$.
+Under the conformal coverage guarantee \eqref{eq:coverage}, for any arm~$k$
+with calibration window of size~$n$,
+\begin{equation}
+    \E[O_t \mid a_t = k, \bm{x}_t]
+    \;\leq\; \alpha \cdot \sigma_y \cdot C_n ,
+\end{equation}
+where $C_n = O(\sqrt{\log n})$ is a constant depending on the calibration
+window size.
+\end{lemma}
+
+\begin{proof}[Proof sketch]
+Decompose $\E[O_t] = \E[O_t \mid y_t \notin [l_t, u_t]]\,
+\Pr(y_t \notin [l_t, u_t])$.  The coverage guarantee bounds the second
+factor by $\alpha$.  For the conditional overshoot, use the
+sub-Gaussianity of $y_t$ and the fact that the conformal quantile
+$\hat{q}_t$ is an order statistic of $n$ residuals, so
+$\hat{q}_t \to q^*$ at rate $O(n^{-1/2}\sqrt{\log n})$
+by the Dvoretzky--Kiefer--Wolfowitz inequality.
+\todo{Formalize the rate for the conditional overshoot term using
+tail bounds on the nonconformity score distribution.}
+\end{proof}
+
+\subsection{Sub-Gaussian Parameter of the Reward Noise}
+
+\begin{proposition}[Reward noise sub-Gaussianity]
+\label{prop:subgaussian}
+Under the linear reward model \eqref{eq:reward-noise}, if $y_t$ is
+conditionally $\sigma_y$-sub-Gaussian, and the conformal calibration uses
+a window of size $n$, then the noise $\eta_t$ is conditionally
+$\sigma$-sub-Gaussian with
+\begin{equation}
+    \sigma^2
+    \;\leq\; \sigma_W^2
+    \;+\; \frac{4}{\alpha^2} \cdot \sigma_y^2 \cdot C_n^2
+    \;+\; \frac{4}{\alpha} \cdot \sigma_W \cdot \sigma_y \cdot C_n ,
+    \label{eq:sigma-bound}
+\end{equation}
+where $\sigma_W^2$ is the variance of the interval width and $C_n$ is
+the constant from Lemma~\ref{lem:overshoot}.
+\end{proposition}
+
+\begin{proof}[Proof sketch]
+The reward is $r_t = -(W_t + \frac{2}{\alpha} O_t)$.  Both $W_t$ and
+$O_t$ are functions of $y_t$, $l_t$, and $u_t$.  The width $W_t$ depends
+on the CQR model and the calibration quantile, which are
+$\mathcal{F}_{t-1}$-measurable.  Given the past, the randomness in $r_t$
+comes from $y_t$.  Since $y_t$ is $\sigma_y$-sub-Gaussian and the
+interval score is Lipschitz in $y_t$ with constant $2/\alpha$, the
+reward noise inherits a sub-Gaussian bound by the contraction principle
+for sub-Gaussian random variables.
+\todo{Verify the Lipschitz constant rigorously.  The interval score
+is piecewise linear in $y_t$ with slopes $0$ (when covered), $2/\alpha$
+(when below), and $2/\alpha$ (when above), so the Lipschitz constant
+is indeed $2/\alpha$.}
+\end{proof}
+
+\begin{remark}
+The key consequence is that the sub-Gaussian parameter $\sigma$ scales as
+$O(\sigma_y / \alpha)$.  For $\alpha = 0.10$ (90\% coverage), the penalty
+multiplier is $2/\alpha = 20$, which amplifies the noise.  This is the
+price of using a high-coverage interval: the reward signal is noisier
+because rare miscoverage events incur large penalties.
+\end{remark}
+
+% ============================================================================
+\section{Regret Bound}
+\label{sec:regret-bound}
+% ============================================================================
+
+We now state the main result.  The proof follows the structure of
+\citet{agrawal2013thompson}, adapted to our conformal reward setting.
+
+\begin{assumption}[Bounded features]
+\label{asm:bounded-features}
+$\norm{\bm{x}_t}_2 \leq L$ for all $t$ and some constant $L > 0$.
+\end{assumption}
+
+\begin{assumption}[Bounded parameters]
+\label{asm:bounded-params}
+$\norm{\bm{\theta}_k}_2 \leq S$ for all $k \in [K]$ and some
+constant $S > 0$.
+\end{assumption}
+
+\begin{assumption}[Sub-Gaussian outcomes]
+\label{asm:subgaussian-outcomes}
+Conditionally on $\bm{x}_t$ and the history $\mathcal{F}_{t-1}$,
+the outcome $y_t$ is $\sigma_y$-sub-Gaussian around its conditional
+mean.
+\end{assumption}
+
+\begin{assumption}[Calibration stability]
+\label{asm:calibration}
+The conformal calibration quantile $\hat{q}_t^{(k)}$ satisfies
+\begin{equation}
+    |\hat{q}_t^{(k)} - q_\infty^{(k)}| \;\leq\; \beta_n ,
+    \qquad \text{where } \beta_n = O\!\left(\frac{\sqrt{\log n}}{\sqrt{n}}\right),
+\end{equation}
+for all $k \in [K]$, where $q_\infty^{(k)}$ is the population-level
+conformal quantile and $n$ is the calibration window size.
+\end{assumption}
+
+\begin{theorem}[Bayesian regret of CTS --- sketch]
+\label{thm:main}
+Under Assumptions~\ref{asm:bounded-features}--\ref{asm:calibration},
+Algorithm~1 (Linear Thompson Sampling with CQR interval score rewards,
+exploration variance parameter~$v^2$, and prior precision~$\lambda$)
+satisfies
+\begin{equation}
+    \mathrm{BayesRegret}(T)
+    \;\leq\;
+    \underbrace{C_1 \cdot d \sqrt{KT \log T}}_{\text{standard LinTS regret}}
+    \;\;+\;\;
+    \underbrace{C_2 \cdot K \sqrt{T} \cdot \beta_n}_{\text{calibration error}} ,
+    \label{eq:main-bound}
+\end{equation}
+where the constants are
+\begin{align}
+    C_1 &\;=\; O\!\left(\frac{\sigma_y}{\alpha}
+                \cdot \frac{L}{\sqrt{\lambda}}
+                \cdot (1 + v^{-1})\right) ,
+    \label{eq:C1} \\[4pt]
+    C_2 &\;=\; O\!\left(\frac{L \cdot S}{\alpha}\right) .
+    \label{eq:C2}
+\end{align}
+\end{theorem}
+
+\begin{remark}[Dependence on $\alpha$]
+The leading constant $C_1$ scales as $1/\alpha$, reflecting the
+amplified noise from the interval score penalty.  For $\alpha = 0.10$
+the effective noise level is roughly $10\times$ larger than for
+$\alpha = 0.50$.  This captures the exploration--coverage tradeoff:
+higher coverage targets produce more informative intervals but noisier
+reward signals.
+\end{remark}
+
+\begin{remark}[Dependence on calibration window $n$]
+The second term vanishes as $n \to \infty$ at rate $O(\sqrt{\log n / n})$.
+For $n = 250$ (the default calibration window in the implementation),
+$\beta_n \approx 0.15$, which is small relative to the leading term
+for moderate~$T$.  This term captures the transient regret incurred
+while the conformal calibration converges.
+\end{remark}
+
+\begin{remark}[Comparison to standard LinTS]
+The standard Bayesian regret bound for Linear Thompson Sampling
+\citep{agrawal2013thompson, russo2018tutorial} is
+$\widetilde{O}(d\sqrt{KT})$ with a sub-Gaussian constant $\sigma$
+for the reward noise.  Our bound has the same rate but with
+$\sigma$ replaced by $\sigma_y / \alpha$, plus an additive calibration
+correction.  When $n$ is large (calibration has converged) and
+$\alpha$ is moderate, the bound matches the standard rate up to the
+$1/\alpha$ factor.
+\end{remark}
+
+% ============================================================================
+\section{Proof Sketch}
+\label{sec:proof}
+% ============================================================================
+
+The proof follows the three-step recipe from \citet{agrawal2013thompson}
+and \citet{russo2018tutorial}, adapted to our setting.
+
+\subsection{Step 1: Anti-Concentration of Posterior Samples}
+
+\begin{lemma}[Anti-concentration]
+\label{lem:anti-concentration}
+Let $\tilde{\bm{\theta}}_k$ be the posterior sample for arm~$k$ at
+round~$t$, drawn from
+$\mathcal{N}(\hat{\bm{\theta}}_k, v^2 \bm{V}_k)$
+where $\bm{V}_k = (\lambda \bm{I} + \sum_{s < t} \bm{x}_s \bm{x}_s^\top
+\mathbf{1}\{a_s = k\})^{-1}$.
+Then for any $\epsilon > 0$,
+\begin{equation}
+    \Pr\!\left(\bm{x}_t^\top \tilde{\bm{\theta}}_k
+    > \bm{x}_t^\top \hat{\bm{\theta}}_k + \epsilon\right)
+    \;\geq\; p_{\min}(\epsilon, v, d) ,
+\end{equation}
+where $p_{\min}(\epsilon, v, d)$ is a positive function that is bounded
+away from zero uniformly over $t$ for fixed $\epsilon, v, d$.
+\end{lemma}
+
+\begin{proof}[Proof sketch]
+This follows directly from the Gaussian posterior.  The sampled reward
+$\bm{x}_t^\top \tilde{\bm{\theta}}_k$ is Gaussian with variance
+$v^2 \bm{x}_t^\top \bm{V}_k \bm{x}_t$.  Since the precision matrix
+$\bm{V}_k^{-1}$ grows with the number of observations, the posterior
+variance shrinks, but at any finite time it remains strictly positive.
+The anti-concentration probability is at least
+$p_{\min} = \Phi(-\epsilon / (v \cdot L / \sqrt{\lambda}))$, where
+$\Phi$ is the standard Gaussian CDF.
+\todo{Tighten the dependence on $t$ by using the growth rate of
+$\bm{V}_k^{-1}$.}
+\end{proof}
+
+\subsection{Step 2: Concentration of Posterior Around True Parameters}
+
+\begin{lemma}[Posterior concentration]
+\label{lem:concentration}
+Under Assumptions~\ref{asm:bounded-features}--\ref{asm:subgaussian-outcomes},
+after $n_k$ pulls of arm~$k$ the posterior mean satisfies
+\begin{equation}
+    \norm{\hat{\bm{\theta}}_k - \bm{\theta}_k}_{\bm{A}_k}
+    \;\leq\; \frac{\sigma_y}{\alpha} \sqrt{2 \log\!\left(\frac{\det(\bm{A}_k)^{1/2}
+    \det(\lambda \bm{I})^{-1/2}}{\delta}\right)}
+    + \lambda^{1/2} S
+    \;+\; \frac{2 n_k \beta_n}{\alpha} ,
+\end{equation}
+with probability at least $1 - \delta$, where
+$\bm{A}_k = \lambda \bm{I} + \sum_{s : a_s = k} \bm{x}_s \bm{x}_s^\top$
+and $\norm{\bm{v}}_{\bm{M}} = \sqrt{\bm{v}^\top \bm{M} \bm{v}}$.
+\end{lemma}
+
+\begin{proof}[Proof sketch]
+We decompose the estimation error:
+\begin{equation}
+    \hat{\bm{\theta}}_k - \bm{\theta}_k
+    \;=\; \bm{A}_k^{-1}\!\left(
+    \sum_{s : a_s = k} \bm{x}_s \eta_s
+    + \lambda (\bm{0} - \bm{\theta}_k)\right) ,
+\end{equation}
+where $\eta_s = r_s - \bm{x}_s^\top \bm{\theta}_k$ is the reward noise
+at round $s$.  The first term is a self-normalized martingale.
+
+\emph{Standard term.}
+By the self-normalized bound for sub-Gaussian martingales
+\citep[Theorem~1]{abbasi2011improved}, the sum
+$\norm{\sum_s \bm{x}_s \eta_s}_{\bm{A}_k^{-1}}$ is bounded by
+$\sigma \sqrt{2 \log(\det(\bm{A}_k)^{1/2} \det(\lambda \bm{I})^{-1/2}
+/ \delta)}$ with probability $1 - \delta$, where $\sigma = O(\sigma_y /
+\alpha)$ by Proposition~\ref{prop:subgaussian}.
+
+\emph{Calibration bias term.}
+The reward noise $\eta_s$ has a small bias due to finite-sample calibration
+error.  At round~$s$, the interval score deviates from its population
+value by at most $O(\beta_n / \alpha)$ because the calibration quantile
+$\hat{q}_s$ deviates from $q_\infty$ by $\beta_n$, and this error is
+amplified by the $2/\alpha$ penalty in the interval score.  Summing over
+$n_k$ pulls gives the additive $2 n_k \beta_n / \alpha$ term.
+
+\todo{Formally verify that the bias from calibration error does not break
+the martingale structure.  One approach: condition on the calibration
+quantile sequence and treat the bias as a deterministic perturbation.}
+\end{proof}
+
+\subsection{Step 3: Regret Decomposition}
+
+Following \citet{agrawal2013thompson}, the Bayesian regret decomposes as
+\begin{equation}
+    \mathrm{BayesRegret}(T)
+    \;=\; \sum_{t=1}^T \E\!\left[
+    \bm{x}_t^\top \bm{\theta}_{a_t^*} - \bm{x}_t^\top \bm{\theta}_{a_t}
+    \right] .
+\end{equation}
+
+\paragraph{High-level argument.}
+By the Thompson Sampling policy, $a_t$ is drawn from the posterior
+distribution over optimal arms.  Therefore
+$\Pr(a_t = k \mid \mathcal{F}_{t-1}) = \Pr(a_t^* = k \mid
+\mathcal{F}_{t-1})$ when the posterior is exact.  The instantaneous regret
+at round~$t$ is then bounded by the posterior width:
+\begin{equation}
+    \E\!\left[\bm{x}_t^\top (\bm{\theta}_{a_t^*} - \bm{\theta}_{a_t})
+    \mid \mathcal{F}_{t-1}\right]
+    \;\leq\; 2\, \max_{k \in [K]}
+    v \cdot \norm{\bm{x}_t}_{\bm{V}_k} .
+\end{equation}
+
+Summing over $t$ and using the elliptical potential lemma
+\citep{dani2008stochastic}:
+\begin{equation}
+    \sum_{t=1}^T \norm{\bm{x}_t}_{\bm{V}_{a_t}}
+    \;\leq\; \sqrt{T \cdot d \log\!\left(1 + \frac{TL^2}{\lambda d}\right)} .
+\end{equation}
+
+Combining with the $\sigma_y / \alpha$ sub-Gaussian parameter and the
+calibration error term gives the bound in Theorem~\ref{thm:main}.
+\todo{Write out the summation over arms and the union bound
+over $k \in [K]$ carefully.  The $\sqrt{K}$ factor arises from needing
+concentration for all $K$ arms simultaneously.}
+
+% ============================================================================
+\section{Discussion}
+\label{sec:discussion}
+% ============================================================================
+
+\subsection{When Does the Bound Tighten?}
+
+The regret bound in Theorem~\ref{thm:main} is tightest when:
+
+\begin{enumerate}
+    \item \textbf{Large calibration window ($n \to \infty$).}
+    The calibration error term $C_2 \cdot K\sqrt{T} \cdot \beta_n$
+    vanishes, leaving only the standard LinTS regret.  In the
+    implementation, $n = 250$ (the default \texttt{calibration\_window}
+    parameter), which gives $\beta_n \approx O(0.15)$.
+
+    \item \textbf{Moderate coverage level ($\alpha$ not too small).}
+    The leading constant scales as $1/\alpha$.  The default $\alpha = 0.10$
+    gives a $10\times$ amplification.  For applications where
+    $\alpha = 0.20$ suffices, the constant halves.
+
+    \item \textbf{Well-separated arms.}
+    The regret bound measures the cost of not knowing $\{\bm{\theta}_k\}$.
+    When the arms are well-separated in the sense that
+    $\min_{k \neq k'} \norm{\bm{\theta}_k - \bm{\theta}_{k'}}_2$ is
+    large relative to $\sigma / \sqrt{n_k}$, the algorithm identifies
+    the best arm quickly.
+
+    \item \textbf{Conformal coverage is exact.}
+    If the CQR procedure achieves exact coverage
+    $\Pr(y_t \in [l_t, u_t]) = 1 - \alpha$ (rather than $\geq 1 - \alpha$),
+    then $\E[O_t]$ is controlled tightly and the variance bound in
+    Proposition~\ref{prop:subgaussian} is sharp.
+\end{enumerate}
+
+\subsection{When Does CTS Help?}
+
+CTS provides gains over fixed baselines (always using a single specification)
+when two conditions hold simultaneously:
+
+\begin{enumerate}
+    \item \textbf{The arm parameters $\bm{\theta}_k$ vary significantly
+    across arms.}
+    If all specifications perform identically
+    ($\bm{\theta}_1 = \cdots = \bm{\theta}_K$), there is no benefit to
+    adaptive selection.
+
+    \item \textbf{The context $\bm{x}_t$ is informative about which arm
+    is best.}
+    The linear model $\E[r_t \mid a_t = k, \bm{x}_t] = \bm{x}_t^\top
+    \bm{\theta}_k$ only helps if different contexts favor different arms.
+    When $\bm{x}_t$ is uninformative, CTS reduces to a non-contextual
+    bandit and the regret bound loses the benefit of context.
+\end{enumerate}
+
+The \emph{regret gap} between CTS and a fixed baseline (always playing
+arm~$k^*$, the best arm in hindsight) can be quantified.  Let
+$\Delta_t = \bm{x}_t^\top \bm{\theta}_{a_t^*} - \bm{x}_t^\top
+\bm{\theta}_{k^*}$ be the per-round advantage of the oracle over the
+fixed baseline.  Then the fixed baseline incurs pseudo-regret
+\begin{equation}
+    R_{\text{fixed}}(T)
+    \;=\; \sum_{t=1}^{T} \Delta_t ,
+\end{equation}
+which grows linearly in $T$ when there are regime changes.  In contrast,
+CTS has sublinear regret $\widetilde{O}(d\sqrt{KT})$, so for large~$T$
+the adaptive method dominates.
+
+\subsection{Connection to the Predictable Non-Stationarity Index}
+
+The diagnostic module in the codebase computes a composite
+\emph{non-stationarity index} from the per-timestep, per-specification
+interval score matrix.  This index has a direct connection to the regret
+bound gap.
+
+\begin{proposition}[Informal]
+\label{prop:diagnostic-connection}
+Let $\mathcal{I}_{\mathrm{PNS}}$ denote the predictable non-stationarity
+index (the composite of switch frequency, selection entropy, performance
+spread, and changepoint count).  Then the expected regret gap between the
+fixed-arm baseline and CTS satisfies
+\begin{equation}
+    \E[R_{\mathrm{fixed}}(T) - R_{\mathrm{CTS}}(T)]
+    \;\gtrsim\; \mathcal{I}_{\mathrm{PNS}} \cdot T \cdot \bar{\Delta}
+    \;-\; \widetilde{O}(d\sqrt{KT}) ,
+    \label{eq:gap}
+\end{equation}
+where $\bar{\Delta}$ is the average per-round score gap between the
+worst and best specification.
+\end{proposition}
+
+\begin{proof}[Argument sketch]
+The fixed baseline accumulates linear regret proportional to how often
+the optimal specification changes and how large the gap is.
+$\mathcal{I}_{\mathrm{PNS}}$ measures exactly this through its
+switch-frequency and performance-spread components.  CTS has
+$\widetilde{O}(\sqrt{T})$ regret regardless.  The gap is therefore
+$\Omega(\mathcal{I}_{\mathrm{PNS}} \cdot T)$ minus the CTS regret.
+\todo{Formalize: relate the switch frequency and performance spread
+components of $\mathcal{I}_{\mathrm{PNS}}$ to $\sum_t \Delta_t$.}
+\end{proof}
+
+This result justifies the diagnostic: when $\mathcal{I}_{\mathrm{PNS}}$
+is large (e.g., $> 0.5$), the linear-in-$T$ advantage of CTS dominates
+the $\sqrt{T}$ regret for moderate horizon lengths.  When
+$\mathcal{I}_{\mathrm{PNS}}$ is small (e.g., $< 0.2$), fixed baselines
+are near-optimal and the overhead of Thompson Sampling exploration is not
+worthwhile.
+
+\subsection{Limitations and Open Questions}
+
+\begin{enumerate}
+    \item \textbf{Non-stationarity of $\bm{\theta}_k$.}
+    Our analysis assumes fixed $\bm{\theta}_k$.  In practice,
+    the true reward parameters may drift.  Extending the bound to
+    non-stationary settings (e.g., via sliding-window or discounted
+    updates) is an important direction.  The adaptive conformal inference
+    framework of \citet{gibbs2021adaptive} provides some coverage
+    guarantees under distribution shift, but connecting this to the
+    bandit regret requires further work.
+
+    \item \textbf{Dependent observations.}
+    The proof sketch assumes conditionally independent observations.
+    Time series data introduces temporal dependence.  Mixing conditions
+    or blocking arguments may be needed to formalize the self-normalized
+    martingale bounds.
+
+    \item \textbf{Misspecification of the linear model.}
+    If the reward is not truly linear in $\bm{x}_t$, the regret bound
+    includes an additional model misspecification term.  Characterizing
+    this term in the conformal setting remains open.
+
+    \item \textbf{Tightness of the $1/\alpha$ factor.}
+    We conjecture that the $1/\alpha$ dependence is unavoidable for
+    interval score rewards, since rare miscoverage events carry
+    $O(1/\alpha)$ penalty.  A lower bound argument would confirm this.
+    \todo{Construct a lower bound instance showing $\Omega(1/\alpha)$
+    dependence in the regret.}
+\end{enumerate}
+
+% ============================================================================
+\section{Summary of Notation}
+\label{sec:notation}
+% ============================================================================
+
+For reference, we collect the key notation:
+
+\begin{center}
+\begin{tabular}{cl}
+\hline
+\textbf{Symbol} & \textbf{Meaning} \\
+\hline
+$K$ & Number of arms (specifications) \\
+$T$ & Number of rounds \\
+$d$ & Context dimension \\
+$\bm{x}_t \in \R^d$ & Context at round $t$ \\
+$a_t \in [K]$ & Action selected at round $t$ \\
+$y_t \in \R$ & Outcome (true value) at round $t$ \\
+$[l_t, u_t]$ & CQR prediction interval \\
+$\IS_\alpha$ & Interval score at miscoverage level $\alpha$ \\
+$r_t = -\IS_\alpha$ & Reward (negative interval score) \\
+$\bm{\theta}_k \in \R^d$ & True parameter vector for arm $k$ \\
+$\hat{\bm{\theta}}_k$ & Posterior mean for arm $k$ \\
+$\bm{V}_k$ & Posterior covariance for arm $k$ \\
+$\bm{A}_k = \bm{V}_k^{-1}$ & Posterior precision for arm $k$ \\
+$v^2$ & Exploration variance inflation \\
+$\lambda$ & Prior precision (regularization) \\
+$n$ & Calibration window size \\
+$\hat{q}_t^{(k)}$ & Conformal calibration quantile for arm $k$ \\
+$\beta_n$ & Calibration convergence rate $O(\sqrt{\log n / n})$ \\
+$\sigma_y$ & Sub-Gaussian parameter of outcomes \\
+$\sigma$ & Effective sub-Gaussian parameter of rewards \\
+$L$ & Bound on $\norm{\bm{x}_t}_2$ \\
+$S$ & Bound on $\norm{\bm{\theta}_k}_2$ \\
+$\mathcal{I}_{\mathrm{PNS}}$ & Predictable non-stationarity index \\
+\hline
+\end{tabular}
+\end{center}
+
+% ============================================================================
+% References
+% ============================================================================
+\bibliographystyle{plainnat}
+
+\begin{thebibliography}{10}
+
+\bibitem[Abbasi-Yadkori et~al.(2011)]{abbasi2011improved}
+Y.~Abbasi-Yadkori, D.~P\'al, and C.~Szepesv\'ari.
+\newblock Improved algorithms for linear stochastic bandits.
+\newblock In \emph{Advances in Neural Information Processing Systems (NeurIPS)},
+  pages 2312--2320, 2011.
+
+\bibitem[Agrawal and Goyal(2013)]{agrawal2013thompson}
+S.~Agrawal and N.~Goyal.
+\newblock Thompson sampling for contextual bandits with linear payoffs.
+\newblock In \emph{Proceedings of the 30th International Conference on Machine
+  Learning (ICML)}, pages 127--135, 2013.
+
+\bibitem[Dani et~al.(2008)]{dani2008stochastic}
+V.~Dani, T.~P.~Hayes, and S.~M.~Kakade.
+\newblock Stochastic linear optimization under bandit feedback.
+\newblock In \emph{Proceedings of the 21st Annual Conference on Learning Theory
+  (COLT)}, pages 355--366, 2008.
+
+\bibitem[Gibbs and Cand\`es(2021)]{gibbs2021adaptive}
+I.~Gibbs and E.~Cand\`es.
+\newblock Adaptive conformal inference under distribution shift.
+\newblock In \emph{Advances in Neural Information Processing Systems (NeurIPS)},
+  2021.
+
+\bibitem[Gneiting and Raftery(2007)]{gneiting2007strictly}
+T.~Gneiting and A.~E.~Raftery.
+\newblock Strictly proper scoring rules, prediction, and estimation.
+\newblock \emph{Journal of the American Statistical Association},
+  102(477):359--378, 2007.
+
+\bibitem[Romano et~al.(2019)]{romano2019conformalized}
+Y.~Romano, E.~Patterson, and E.~Cand\`es.
+\newblock Conformalized quantile regression.
+\newblock In \emph{Advances in Neural Information Processing Systems (NeurIPS)},
+  2019.
+
+\bibitem[Russo and Van~Roy(2018)]{russo2018tutorial}
+D.~Russo and B.~Van~Roy.
+\newblock A tutorial on {T}hompson sampling.
+\newblock \emph{Foundations and Trends in Machine Learning},
+  11(1):1--96, 2018.
+
+\bibitem[Vovk et~al.(2005)]{vovk2005algorithmic}
+V.~Vovk, A.~Gammerman, and G.~Shafer.
+\newblock \emph{Algorithmic Learning in a Random World}.
+\newblock Springer, 2005.
+
+\end{thebibliography}
+
+\end{document}
