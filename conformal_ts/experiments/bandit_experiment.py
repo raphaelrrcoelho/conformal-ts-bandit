@@ -312,9 +312,12 @@ def run_bandit_experiment(
         # Full-information update: normalize all K rewards and update
         # every arm so CTS learns at the same rate as CV-Fixed.
         raw_rewards = -row  # negative scores (higher is better)
+        # Normalize with OLD stats (predict-then-update pattern),
+        # then update the normalizer.
+        normalized = [np.clip(normalizer.normalize(v), -3.0, 3.0)
+                      for v in raw_rewards]
         for val in raw_rewards:
             normalizer.update(val)
-        normalized = [normalizer.normalize(v) for v in raw_rewards]
         bandit.update_all_arms(ctx, normalized, selected_action=cts_action)
 
         # Coverage tracking for CTS

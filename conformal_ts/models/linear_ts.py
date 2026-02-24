@@ -283,22 +283,31 @@ class LinearThompsonSampling:
             f"rewards length {len(rewards)} != num_actions {self.num_actions}"
         )
 
+        # All arms share the same context, so the precision /
+        # covariance update is identical for every arm.  Compute
+        # the Sherman-Morrison update once using arm 0 as reference
+        # and copy the result to all arms.
+        ref = self.arms[0]
+        phi_outer = np.outer(context, context)
+        new_precision = ref.precision_matrix + phi_outer
+
+        Vphi = ref.covariance_matrix @ context
+        denom = 1.0 + context @ Vphi
+        if denom > self.regularization_epsilon:
+            new_covariance = ref.covariance_matrix - np.outer(Vphi, Vphi) / denom
+        else:
+            new_covariance = np.linalg.inv(
+                new_precision + self.regularization_epsilon * np.eye(self.feature_dim)
+            )
+
         for a in range(self.num_actions):
             arm = self.arms[a]
             r = rewards[a]
 
-            # Precision: A += phi @ phi^T
-            arm.precision_matrix += np.outer(context, context)
+            arm.precision_matrix = new_precision.copy()
+            arm.covariance_matrix = new_covariance.copy()
 
-            # Sherman-Morrison covariance update
-            Vphi = arm.covariance_matrix @ context
-            denom = 1.0 + context @ Vphi
-            if denom > self.regularization_epsilon:
-                arm.covariance_matrix -= np.outer(Vphi, Vphi) / denom
-            else:
-                self._recompute_covariance(arm)
-
-            # b += phi * r
+            # b += phi * r  (arm-specific)
             arm.b_vector += context * r
 
             # theta_hat = V @ b
