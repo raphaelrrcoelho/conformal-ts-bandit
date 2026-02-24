@@ -256,9 +256,12 @@ def run_bandit_experiment(
         cts_covered_full = np.zeros(T, dtype=bool)
 
     # ACI state
+    from collections import deque as _deque
+    from conformal_ts.evaluation.metrics import interval_score as _interval_score
     alpha_nominal = 0.10  # default nominal miscoverage
     alpha_t = alpha_nominal
     cv_window = config.cv_window
+    aci_residual_buffer: _deque = _deque(maxlen=50)
 
     # --- simulation loop ---
     for t in range(T):
@@ -301,34 +304,51 @@ def run_bandit_experiment(
         cv_fixed_scores_full[t] = row[cv_action]
 
         # ACI baseline (Gibbs & Candès, 2021)
-        # Use spec 0 scores, scaled by running alpha adjustment.
+        # Rebuild conformal interval at current alpha_t from rolling
+        # residuals, then score against the true target.
         aci_alpha_full[t] = alpha_t
-        base_score = row[0]
-        if alpha_t > 0 and alpha_t < alpha_nominal:
-            # Wants wider intervals -> penalty
-            aci_scores_full[t] = base_score * (alpha_nominal / alpha_t)
-        else:
-            aci_scores_full[t] = base_score
 
-        # Update ACI alpha: alpha_{t+1} = alpha + gamma*(err_t - alpha)
-        # err_t = 1 if NOT covered at step t, 0 if covered.
-        # Heuristic from scores: if score == width (no penalty) -> covered.
-        # With interval scores, covered <=> score == width of interval.
-        # If we have intervals_matrix we use exact coverage; otherwise
-        # approximate: spec-0 "covered" if score <= median of spec-0
-        # scores seen so far.
         if track_coverage:
-            lo0 = intervals_matrix[t, 0, 0]
-            hi0 = intervals_matrix[t, 0, 1]
-            err_t = 0.0 if (lo0 <= targets[t] <= hi0) else 1.0
+            # Use midpoint from spec-0 interval as point forecast
+            midpoint = 0.5 * (intervals_matrix[t, 0, 0] + intervals_matrix[t, 0, 1])
+
+            # Conformal quantile from rolling residuals
+            if len(aci_residual_buffer) >= 2:
+                residuals = np.array(aci_residual_buffer)
+                n_res = len(residuals)
+                q_idx = int(np.ceil((n_res + 1) * (1 - alpha_t)))
+                q_idx = min(q_idx, n_res) - 1  # 0-indexed
+                q = float(np.sort(np.abs(residuals))[max(q_idx, 0)])
+            else:
+                # Fallback: use spec-0 half-width until buffer fills
+                q = 0.5 * (intervals_matrix[t, 0, 1] - intervals_matrix[t, 0, 0])
+
+            aci_lo = midpoint - q
+            aci_hi = midpoint + q
+            aci_scores_full[t] = _interval_score(
+                np.array([aci_lo]),
+                np.array([aci_hi]),
+                np.array([targets[t]]),
+                alpha=alpha_nominal,
+            )[0]
+
+            # Coverage check for alpha update
+            err_t = 0.0 if (aci_lo <= targets[t] <= aci_hi) else 1.0
+
+            # Update residual buffer AFTER scoring
+            aci_residual_buffer.append(targets[t] - midpoint)
         else:
-            # Fallback heuristic: compare to running median
+            # No intervals available -- fall back to spec-0 score
+            aci_scores_full[t] = row[0]
+            # Heuristic coverage from running median
             if t > 0:
                 past = scores_matrix[:t + 1, 0]
-                err_t = 0.0 if base_score <= float(np.median(past)) else 1.0
+                err_t = 0.0 if row[0] <= float(np.median(past)) else 1.0
             else:
                 err_t = 0.0
-        alpha_t = alpha_nominal + config.aci_gamma * (err_t - alpha_nominal)
+
+        # Cumulative alpha update: alpha_{t+1} = alpha_t + gamma*(alpha - err_t)
+        alpha_t = alpha_t + config.aci_gamma * (alpha_nominal - err_t)
         # Clamp to (0, 1)
         alpha_t = float(np.clip(alpha_t, 1e-6, 1.0 - 1e-6))
 

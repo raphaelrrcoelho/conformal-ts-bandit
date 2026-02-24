@@ -307,7 +307,7 @@ class RealDatasetLoader:
                 )[0]
 
         # --- Build context features (T, D) --------------------------------
-        contexts = self._build_context_features(
+        contexts = self.build_context_features(
             df, target, warmup, T_total, config,
         )
 
@@ -322,6 +322,83 @@ class RealDatasetLoader:
             "target_values": target_values,
             "dataset_name": name,
             "freq": config.freq,
+        }
+
+    def prepare_raw_series(
+        self,
+        name: str,
+        num_specs: Optional[int] = None,
+        warmup_fraction: float = 0.05,
+    ) -> Optional[Dict]:
+        """
+        Return raw series data for external CQR scoring.
+
+        Unlike :meth:`prepare_bandit_experiment`, this does **not** build
+        scores or context features -- it just loads the dataset, identifies
+        the target column, computes the warmup, and returns the pieces
+        that the caller needs to compose CQR scoring with rich contexts.
+
+        Parameters
+        ----------
+        name : str
+            Dataset name (key in REGISTRY).
+        num_specs : int, optional
+            If given, use only the first ``num_specs`` lookback windows.
+        warmup_fraction : float
+            Fraction of timesteps to skip at the start.
+
+        Returns
+        -------
+        dict or None
+            ``df``               -- pd.DataFrame (full dataset)
+            ``target``           -- np.ndarray, shape (N,) raw target values
+            ``lookback_windows`` -- list[int]
+            ``config``           -- RealDatasetConfig
+            ``warmup``           -- int  (number of steps to skip)
+            ``T_total``          -- int  (number of scoreable steps)
+        """
+        df = self.load(name)
+        if df is None:
+            return None
+
+        config = self.REGISTRY[name]
+        target_col = config.target_col
+
+        # For Electricity we average sampled client columns into a target.
+        if name == "Electricity" and target_col not in df.columns:
+            target_col = df.columns[0]
+
+        if target_col not in df.columns:
+            logger.error(
+                "Target column '%s' not found in %s. Columns: %s",
+                target_col, name, list(df.columns),
+            )
+            return None
+
+        target = df[target_col].values.astype(np.float64)
+
+        lookback_windows = list(config.lookback_windows)
+        if num_specs is not None:
+            lookback_windows = lookback_windows[:num_specs]
+
+        max_lb = max(lookback_windows)
+        warmup = max(int(len(target) * warmup_fraction), max_lb + 1)
+
+        T_total = len(target) - warmup
+        if T_total <= 0:
+            logger.error(
+                "Dataset %s is too short for the requested lookback windows.",
+                name,
+            )
+            return None
+
+        return {
+            "df": df,
+            "target": target,
+            "lookback_windows": lookback_windows,
+            "config": config,
+            "warmup": warmup,
+            "T_total": T_total,
         }
 
     # ------------------------------------------------------------------
@@ -517,7 +594,7 @@ class RealDatasetLoader:
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _build_context_features(
+    def build_context_features(
         df: pd.DataFrame,
         target: np.ndarray,
         warmup: int,

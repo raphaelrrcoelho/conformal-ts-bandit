@@ -386,50 +386,77 @@ def _compute_nonstationarity_fallback(
 
 def _run_real_dataset_experiment(
     dataset_name: str,
-    n_steps: int,
+    n_steps: Optional[int],
     seed: int,
 ) -> Dict[str, Any]:
     """
-    Run CTS + baselines on a real dataset from the RealDatasetLoader.
+    Run CTS + baselines on a real dataset with CQR-based conformal intervals.
 
-    Downloads/caches the dataset, builds the scores matrix from real
-    rolling-window forecasters, then delegates to run_bandit_experiment
-    with train/test split and all baselines (CV-Fixed, ACI, etc.).
+    Uses :meth:`RealDatasetLoader.prepare_raw_series` for the raw target,
+    :func:`build_scores_matrix_with_cqr` for proper conformal scoring
+    (with coverage tracking), and :meth:`RealDatasetLoader.build_context_features`
+    for the rich 13-dim context matrix.
     """
     from conformal_ts.data.real_datasets import RealDatasetLoader
     from conformal_ts.experiments.bandit_experiment import (
         BanditExperimentConfig,
+        build_scores_matrix_with_cqr,
         run_bandit_experiment,
     )
 
     loader = RealDatasetLoader()
-    data = loader.prepare_bandit_experiment(dataset_name, num_specs=5)
-    if data is None:
+    raw = loader.prepare_raw_series(dataset_name, num_specs=5)
+    if raw is None:
         raise RuntimeError(f"Failed to load dataset: {dataset_name}")
 
-    scores_matrix = data["scores_matrix"]
-    contexts = data["contexts"]
+    target = raw["target"]
+    lookback_windows = raw["lookback_windows"]
+    warmup = raw["warmup"]
+    df = raw["df"]
+    config_ds = raw["config"]
+
+    # Build CQR scores matrix (conformal intervals + targets)
+    scores_matrix, _cqr_ctx, targets, intervals = build_scores_matrix_with_cqr(
+        target,
+        lookback_windows=lookback_windows,
+        alpha=0.10,
+        min_history=warmup,
+        calibration_window=50,
+    )
+
+    T = scores_matrix.shape[0]
+
+    # Build rich 13-dim context features
+    contexts = RealDatasetLoader.build_context_features(
+        df, target, warmup, T, config_ds,
+    )
 
     # Truncate to n_steps if requested
-    if n_steps is not None and n_steps < scores_matrix.shape[0]:
+    if n_steps is not None and n_steps < T:
         scores_matrix = scores_matrix[:n_steps]
         contexts = contexts[:n_steps]
+        targets = targets[:n_steps]
+        intervals = intervals[:n_steps]
+        T = n_steps
 
     num_specs = scores_matrix.shape[1]
     feature_dim = contexts.shape[1]
-    train_steps = min(50, scores_matrix.shape[0] // 5)
+    train_steps = min(50, T // 5)
 
     config = BanditExperimentConfig(
         num_specs=num_specs,
         feature_dim=feature_dim,
-        warmup_rounds=min(20, scores_matrix.shape[0] // 10),
+        warmup_rounds=min(20, T // 10),
         exploration_variance=5.0,
         prior_precision=0.1,
         seed=seed,
         train_steps=train_steps,
         cv_window=50,
     )
-    result = run_bandit_experiment(scores_matrix, contexts, config)
+    result = run_bandit_experiment(
+        scores_matrix, contexts, config,
+        targets=targets, intervals_matrix=intervals,
+    )
 
     return _build_result_dict(result, num_specs)
 
@@ -438,6 +465,7 @@ def _dispatch_experiment(
     dataset_name: str,
     n_steps: int,
     seed: int,
+    max_real_steps: Optional[int] = None,
 ) -> Dict[str, Any]:
     """Dispatch to the right experiment runner and return raw results dict."""
     if dataset_name == "synthetic_high":
@@ -451,7 +479,10 @@ def _dispatch_experiment(
     elif dataset_name == "gefcom_wind":
         return _run_gefcom_experiment(track="wind", n_steps=n_steps, seed=seed)
     elif dataset_name in _REAL_DATASET_NAMES:
-        return _run_real_dataset_experiment(dataset_name, n_steps=n_steps, seed=seed)
+        # Real datasets use full length by default; only truncate when
+        # explicitly requested via --quick or --max-real-steps.
+        real_steps = max_real_steps  # None = full dataset
+        return _run_real_dataset_experiment(dataset_name, n_steps=real_steps, seed=seed)
     else:
         raise ValueError(f"Unknown dataset: {dataset_name}")
 
@@ -460,12 +491,13 @@ def run_single_dataset(
     dataset_name: str,
     n_steps: int,
     seed: int,
+    max_real_steps: Optional[int] = None,
 ) -> DatasetResult:
     """Run CTS experiment on one dataset (single seed) and compute diagnostics."""
     t0 = time.perf_counter()
     logger.info(f"Running dataset: {dataset_name}")
 
-    raw = _dispatch_experiment(dataset_name, n_steps, seed)
+    raw = _dispatch_experiment(dataset_name, n_steps, seed, max_real_steps=max_real_steps)
     elapsed = time.perf_counter() - t0
 
     # Compute non-stationarity (with contexts for predictable NS when available)
@@ -635,6 +667,7 @@ def run_dataset_multi_seed(
     n_steps: int,
     base_seed: int,
     n_seeds: int,
+    max_real_steps: Optional[int] = None,
 ) -> DatasetResult:
     """
     Run dataset across multiple seeds and aggregate with CIs + significance.
@@ -673,7 +706,7 @@ def run_dataset_multi_seed(
         seed = base_seed + s
         logger.info(f"  Seed {seed} ({s + 1}/{n_seeds})")
 
-        raw = _dispatch_experiment(dataset_name, n_steps, seed)
+        raw = _dispatch_experiment(dataset_name, n_steps, seed, max_real_steps=max_real_steps)
 
         # Per-seed means
         cts_m = float(np.mean(raw["cts_scores"])) if len(raw["cts_scores"]) > 0 else 0.0
@@ -971,6 +1004,13 @@ def parse_args():
         help="Number of seeds per dataset (default: 10). "
              "Seeds will be [seed, seed+1, ..., seed+n_seeds-1].",
     )
+    parser.add_argument(
+        "--max-real-steps",
+        type=int,
+        default=None,
+        help="Max steps for real datasets (default: None = full dataset). "
+             "Overridden to n_steps when --quick is used.",
+    )
     return parser.parse_args()
 
 
@@ -987,6 +1027,10 @@ def main():
     n_seeds = args.n_seeds
     output_dir = Path(args.output)
 
+    # Real dataset step limit: --quick forces truncation, otherwise use
+    # --max-real-steps (default None = full dataset).
+    max_real_steps = n_steps if args.quick else args.max_real_steps
+
     logger.info("=" * 60)
     logger.info("  Diagnostic Comparison: Non-Stationarity vs CTS Benefit")
     logger.info("=" * 60)
@@ -995,6 +1039,7 @@ def main():
     logger.info(f"  Seed     : {args.seed}")
     logger.info(f"  N seeds  : {n_seeds}")
     logger.info(f"  Output   : {output_dir}")
+    logger.info(f"  Max real : {max_real_steps or 'full'}")
     logger.info("=" * 60)
 
     results: List[DatasetResult] = []
@@ -1007,10 +1052,12 @@ def main():
                     n_steps=n_steps,
                     base_seed=args.seed,
                     n_seeds=n_seeds,
+                    max_real_steps=max_real_steps,
                 )
             else:
                 result = run_single_dataset(
                     ds_name, n_steps=n_steps, seed=args.seed,
+                    max_real_steps=max_real_steps,
                 )
             results.append(result)
         except Exception:
