@@ -139,14 +139,6 @@ _REGISTRY: Dict[str, RealDatasetConfig] = {
         description="Synthetic Australian-style half-hourly electricity demand.",
         lookback_windows=[48, 96, 192, 336, 672],  # Scaled for 30-min
     ),
-    "Weather": RealDatasetConfig(
-        name="Weather",
-        url="https://raw.githubusercontent.com/zhouhaoyi/ETDataset/main/ETT-small/ETTm1.csv",
-        target_col="OT",
-        freq="15min",
-        description="Meteorological indicators at 15-min resolution (ETTm1 proxy).",
-        lookback_windows=[96, 192, 384, 672, 1344],  # Scaled for 15-min
-    ),
     "ETTm1": RealDatasetConfig(
         name="ETTm1",
         url="https://raw.githubusercontent.com/zhouhaoyi/ETDataset/main/ETT-small/ETTm1.csv",
@@ -730,9 +722,13 @@ class RealDatasetLoader:
             # Calendar features
             if has_datetime and t < len(idx):
                 ts = idx[t]
-                hour_frac = ts.hour + ts.minute / 60.0
-                contexts[i, 6] = np.sin(2 * np.pi * hour_frac / 24)
-                contexts[i, 7] = np.cos(2 * np.pi * hour_frac / 24)
+                # Hour-of-day only for sub-daily frequencies;
+                # for daily+ data hour is always 0 → constant features
+                # (col 7 = cos(0) = 1 is collinear with bias).
+                if steps_per_hour >= 1:
+                    hour_frac = ts.hour + ts.minute / 60.0
+                    contexts[i, 6] = np.sin(2 * np.pi * hour_frac / 24)
+                    contexts[i, 7] = np.cos(2 * np.pi * hour_frac / 24)
                 contexts[i, 8] = np.sin(2 * np.pi * ts.dayofweek / 7)
                 contexts[i, 9] = np.cos(2 * np.pi * ts.dayofweek / 7)
 
