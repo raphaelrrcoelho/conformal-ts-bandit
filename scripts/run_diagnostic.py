@@ -423,12 +423,19 @@ def _run_real_dataset_experiment(
     df = raw["df"]
     config_ds = raw["config"]
 
-    # Build diverse forecasters from dataset's seasonal period
+    # Build diverse forecasters from dataset's seasonal period.
+    # Use horizon = seasonal_period (1 full cycle ahead) so that
+    # Naive no longer dominates on smooth high-frequency series.
     seasonal_period = config_ds.seasonal_period or 24
+    horizon = seasonal_period  # e.g. 24 for hourly, 96 for 15-min
     forecasters = make_default_forecasters(
         seasonal_period=seasonal_period,
         rolling_window=50,
         trend_window=20,
+        horizon=horizon,
+    )
+    logger.info(
+        f"  {dataset_name}: horizon={horizon}, seasonal_period={seasonal_period}"
     )
 
     # Ensure min_history is sufficient for all forecasters
