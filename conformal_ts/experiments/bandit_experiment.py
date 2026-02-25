@@ -56,6 +56,29 @@ class _RunningNormalizer:
 
 
 # ---------------------------------------------------------------------------
+# Random Fourier Features (RFF) lifter
+# ---------------------------------------------------------------------------
+
+class _RFFLifter:
+    """Lift D-dim context to M-dim nonlinear feature space via Random Fourier Features.
+
+    phi_rff(x) = sqrt(2/M) * cos(W @ x + b)
+
+    W (M x D) and b (M,) are drawn once and fixed.
+    """
+
+    def __init__(self, input_dim: int, rff_dim: int, seed: int = 0):
+        rng = np.random.default_rng(seed)
+        self.W = rng.standard_normal((rff_dim, input_dim))
+        self.b = rng.uniform(0, 2 * np.pi, size=rff_dim)
+        self.scale = np.sqrt(2.0 / rff_dim)
+
+    def lift(self, context: np.ndarray) -> np.ndarray:
+        """Map context (D,) -> lifted features (M,)."""
+        return self.scale * np.cos(self.W @ context + self.b)
+
+
+# ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
 
@@ -79,6 +102,12 @@ class BanditExperimentConfig:
 
     # ACI learning rate (gamma in Gibbs & Candès, 2021).
     aci_gamma: float = 0.01
+
+    # Sliding-window size for the TS posterior (None = no forgetting).
+    window_size: Optional[int] = None
+
+    # Random Fourier Features dimension (None = no lifting).
+    rff_dim: Optional[int] = None
 
 
 # ---------------------------------------------------------------------------
@@ -247,13 +276,21 @@ def run_bandit_experiment(
             f"targets shape {targets.shape} != expected ({T},)"
         )
 
+    # --- optional RFF lifting ---
+    lifter: Optional[_RFFLifter] = None
+    bandit_dim = D
+    if config.rff_dim is not None:
+        lifter = _RFFLifter(D, config.rff_dim, seed=config.seed)
+        bandit_dim = config.rff_dim
+
     # --- set up bandit ---
     bandit = LinearThompsonSampling(
         num_actions=K,
-        feature_dim=D,
+        feature_dim=bandit_dim,
         prior_precision=config.prior_precision,
         exploration_variance=config.exploration_variance,
         seed=config.seed,
+        window_size=config.window_size,
     )
 
     # Effective warmup = max(config warmup, train_steps)
@@ -302,11 +339,14 @@ def run_bandit_experiment(
         optimal_specs_full[t] = best_k
         oracle_scores_full[t] = row[best_k]
 
+        # Optionally lift context for the bandit
+        bandit_ctx = lifter.lift(ctx) if lifter is not None else ctx
+
         # CTS
         if t < warmup:
             cts_action = t % K
         else:
-            cts_action = bandit.select_action(ctx)
+            cts_action = bandit.select_action(bandit_ctx)
         cts_selections_full[t] = cts_action
         cts_scores_full[t] = row[cts_action]
         # Full-information update: normalize all K rewards and update
@@ -318,7 +358,7 @@ def run_bandit_experiment(
                       for v in raw_rewards]
         for val in raw_rewards:
             normalizer.update(val)
-        bandit.update_all_arms(ctx, normalized, selected_action=cts_action)
+        bandit.update_all_arms(bandit_ctx, normalized, selected_action=cts_action)
 
         # Coverage tracking for CTS
         if track_coverage:

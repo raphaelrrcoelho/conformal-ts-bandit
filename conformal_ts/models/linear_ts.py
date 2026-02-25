@@ -13,6 +13,7 @@ Reference:
 """
 
 import numpy as np
+from collections import deque
 from typing import List, Tuple, Optional, Dict, Any
 from dataclasses import dataclass, field
 import warnings
@@ -65,11 +66,12 @@ class LinearThompsonSampling:
         condition_number_threshold: float = 1e10,
         regularization_epsilon: float = 1e-6,
         recompute_interval: int = 100,
-        seed: Optional[int] = None
+        seed: Optional[int] = None,
+        window_size: Optional[int] = None,
     ):
         """
         Initialize Linear Thompson Sampling.
-        
+
         Args:
             num_actions: Number of arms/specifications
             feature_dim: Dimension of feature vectors
@@ -79,6 +81,9 @@ class LinearThompsonSampling:
             regularization_epsilon: Small value for numerical stability
             recompute_interval: Recompute covariance from precision every N updates
             seed: Random seed for reproducibility
+            window_size: If set, only the last *window_size* observations
+                contribute to the posterior (sliding-window forgetting).
+                None means all observations are kept (standard behavior).
         """
         self.num_actions = num_actions
         self.feature_dim = feature_dim
@@ -87,14 +92,24 @@ class LinearThompsonSampling:
         self.condition_number_threshold = condition_number_threshold
         self.regularization_epsilon = regularization_epsilon
         self.recompute_interval = recompute_interval
-        
+        self.window_size = window_size
+
         # Random state
         self.rng = np.random.default_rng(seed)
-        
+
         # Initialize arm states
         self.arms: List[ArmState] = []
         self._initialize_arms()
-        
+
+        # Sliding-window buffers (per-arm context and reward histories)
+        if window_size is not None:
+            self._arm_ctx_buffers: List[deque] = [
+                deque(maxlen=window_size) for _ in range(num_actions)
+            ]
+            self._arm_reward_buffers: List[deque] = [
+                deque(maxlen=window_size) for _ in range(num_actions)
+            ]
+
         # Tracking
         self.total_rounds = 0
         self.action_history: List[int] = []
@@ -222,36 +237,40 @@ class LinearThompsonSampling:
         """
         context = np.asarray(context).flatten()
         arm = self.arms[action]
-        
-        # Update precision matrix: A += phi @ phi^T
-        arm.precision_matrix += np.outer(context, context)
-        
-        # Sherman-Morrison update for covariance
-        # V_{t+1} = V_t - (V_t @ phi @ phi^T @ V_t) / (1 + phi^T @ V_t @ phi)
-        Vphi = arm.covariance_matrix @ context
-        denom = 1.0 + context @ Vphi
-        
-        if denom > self.regularization_epsilon:
-            arm.covariance_matrix -= np.outer(Vphi, Vphi) / denom
+
+        # Sliding-window path: store observation, recompute from buffer
+        if self.window_size is not None:
+            self._arm_ctx_buffers[action].append(context.copy())
+            self._arm_reward_buffers[action].append(reward)
+            self._recompute_arm_from_window(action)
         else:
-            # Numerical issue - recompute from precision
-            self._recompute_covariance(arm)
-        
-        # Update b vector: b += phi * r
-        arm.b_vector += context * reward
-        
-        # Update posterior mean: theta_hat = V @ b
-        arm.theta_hat = arm.covariance_matrix @ arm.b_vector
-        
+            # Standard incremental path
+            # Update precision matrix: A += phi @ phi^T
+            arm.precision_matrix += np.outer(context, context)
+
+            # Sherman-Morrison update for covariance
+            Vphi = arm.covariance_matrix @ context
+            denom = 1.0 + context @ Vphi
+            if denom > self.regularization_epsilon:
+                arm.covariance_matrix -= np.outer(Vphi, Vphi) / denom
+            else:
+                self._recompute_covariance(arm)
+
+            # Update b vector: b += phi * r
+            arm.b_vector += context * reward
+
+            # Update posterior mean: theta_hat = V @ b
+            arm.theta_hat = arm.covariance_matrix @ arm.b_vector
+
+            # Periodic recomputation for numerical stability
+            arm.updates_since_recompute += 1
+            if arm.updates_since_recompute >= self.recompute_interval:
+                self._check_and_recompute(arm)
+
         # Update tracking
         arm.pull_count += 1
         arm.cumulative_reward += reward
-        arm.updates_since_recompute += 1
-        
-        # Periodic recomputation for numerical stability
-        if arm.updates_since_recompute >= self.recompute_interval:
-            self._check_and_recompute(arm)
-        
+
         # Global tracking
         self.total_rounds += 1
         self.action_history.append(action)
@@ -283,49 +302,120 @@ class LinearThompsonSampling:
             f"rewards length {len(rewards)} != num_actions {self.num_actions}"
         )
 
-        # All arms share the same context, so the precision /
-        # covariance update is identical for every arm.  Compute
-        # the Sherman-Morrison update once using arm 0 as reference
-        # and copy the result to all arms.
-        ref = self.arms[0]
-        phi_outer = np.outer(context, context)
-        new_precision = ref.precision_matrix + phi_outer
-
-        Vphi = ref.covariance_matrix @ context
-        denom = 1.0 + context @ Vphi
-        if denom > self.regularization_epsilon:
-            new_covariance = ref.covariance_matrix - np.outer(Vphi, Vphi) / denom
+        # Sliding-window path: append to all buffers, recompute once
+        if self.window_size is not None:
+            ctx_copy = context.copy()
+            for a in range(self.num_actions):
+                self._arm_ctx_buffers[a].append(ctx_copy)
+                self._arm_reward_buffers[a].append(rewards[a])
+            self._recompute_all_from_window()
+            for a in range(self.num_actions):
+                self.arms[a].pull_count += 1
+                self.arms[a].cumulative_reward += rewards[a]
         else:
-            new_covariance = np.linalg.inv(
-                new_precision + self.regularization_epsilon * np.eye(self.feature_dim)
-            )
+            # Standard incremental path -- all arms share the same
+            # context so compute precision/covariance update once.
+            ref = self.arms[0]
+            phi_outer = np.outer(context, context)
+            new_precision = ref.precision_matrix + phi_outer
 
-        for a in range(self.num_actions):
-            arm = self.arms[a]
-            r = rewards[a]
+            Vphi = ref.covariance_matrix @ context
+            denom = 1.0 + context @ Vphi
+            if denom > self.regularization_epsilon:
+                new_covariance = ref.covariance_matrix - np.outer(Vphi, Vphi) / denom
+            else:
+                new_covariance = np.linalg.inv(
+                    new_precision + self.regularization_epsilon * np.eye(self.feature_dim)
+                )
 
-            arm.precision_matrix = new_precision.copy()
-            arm.covariance_matrix = new_covariance.copy()
+            for a in range(self.num_actions):
+                arm = self.arms[a]
+                r = rewards[a]
 
-            # b += phi * r  (arm-specific)
-            arm.b_vector += context * r
+                arm.precision_matrix = new_precision.copy()
+                arm.covariance_matrix = new_covariance.copy()
 
-            # theta_hat = V @ b
-            arm.theta_hat = arm.covariance_matrix @ arm.b_vector
+                # b += phi * r  (arm-specific)
+                arm.b_vector += context * r
 
-            # Tracking
-            arm.pull_count += 1
-            arm.cumulative_reward += r
-            arm.updates_since_recompute += 1
+                # theta_hat = V @ b
+                arm.theta_hat = arm.covariance_matrix @ arm.b_vector
 
-            if arm.updates_since_recompute >= self.recompute_interval:
-                self._check_and_recompute(arm)
+                # Tracking
+                arm.pull_count += 1
+                arm.cumulative_reward += r
+                arm.updates_since_recompute += 1
+
+                if arm.updates_since_recompute >= self.recompute_interval:
+                    self._check_and_recompute(arm)
 
         # Global tracking
         self.total_rounds += 1
         picked = selected_action if selected_action is not None else 0
         self.action_history.append(picked)
         self.reward_history.append(rewards[picked])
+
+    # ------------------------------------------------------------------
+    # Sliding-window helpers
+    # ------------------------------------------------------------------
+
+    def _recompute_arm_from_window(self, arm_idx: int):
+        """Rebuild posterior for *arm_idx* from its sliding-window buffer."""
+        arm = self.arms[arm_idx]
+        buf_ctx = self._arm_ctx_buffers[arm_idx]
+        buf_rew = self._arm_reward_buffers[arm_idx]
+
+        precision = self.prior_precision * np.eye(self.feature_dim)
+        b = np.zeros(self.feature_dim)
+
+        if len(buf_ctx) > 0:
+            X = np.array(buf_ctx)           # (W, D)
+            r = np.array(buf_rew)            # (W,)
+            precision += X.T @ X             # (D, D)
+            b = X.T @ r                      # (D,)
+
+        covariance = np.linalg.inv(
+            precision + self.regularization_epsilon * np.eye(self.feature_dim)
+        )
+
+        arm.precision_matrix = precision
+        arm.covariance_matrix = covariance
+        arm.b_vector = b
+        arm.theta_hat = covariance @ b
+        arm.updates_since_recompute = 0
+
+    def _recompute_all_from_window(self):
+        """Rebuild posteriors for all arms from sliding-window buffers.
+
+        Exploits the fact that update_all_arms always uses the same
+        context for every arm, so precision/covariance are shared.
+        """
+        buf_ctx = self._arm_ctx_buffers[0]
+
+        precision = self.prior_precision * np.eye(self.feature_dim)
+        if len(buf_ctx) > 0:
+            X = np.array(buf_ctx)            # (W, D)
+            precision += X.T @ X
+
+        covariance = np.linalg.inv(
+            precision + self.regularization_epsilon * np.eye(self.feature_dim)
+        )
+
+        for a in range(self.num_actions):
+            arm = self.arms[a]
+            buf_rew = self._arm_reward_buffers[a]
+
+            b = np.zeros(self.feature_dim)
+            if len(buf_ctx) > 0:
+                X = np.array(buf_ctx)
+                r = np.array(buf_rew)
+                b = X.T @ r
+
+            arm.precision_matrix = precision.copy()
+            arm.covariance_matrix = covariance.copy()
+            arm.b_vector = b
+            arm.theta_hat = covariance @ b
+            arm.updates_since_recompute = 0
 
     def _recompute_covariance(self, arm: ArmState):
         """Recompute covariance matrix from precision matrix."""
@@ -509,13 +599,14 @@ if __name__ == "__main__":
     # True parameters (unknown to agent)
     true_thetas = np.random.randn(num_actions, feature_dim)
     
-    # Create bandit
+    # Create bandit (with sliding window to exercise that code path)
     bandit = LinearThompsonSampling(
         num_actions=num_actions,
         feature_dim=feature_dim,
         prior_precision=1.0,
         exploration_variance=1.0,
-        seed=42
+        seed=42,
+        window_size=50,
     )
     
     # Run simulation

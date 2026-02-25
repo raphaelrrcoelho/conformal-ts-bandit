@@ -161,6 +161,7 @@ def _run_synthetic_experiment(
         seed=seed,
         train_steps=train_steps,
         cv_window=50,
+        window_size=250,
     )
     result = run_bandit_experiment(
         scores_matrix, contexts, config,
@@ -282,6 +283,7 @@ def _run_gefcom_experiment(
         seed=seed,
         train_steps=train_steps,
         cv_window=50,
+        window_size=250,
     )
     result = run_bandit_experiment(scores_matrix, contexts, config)
 
@@ -452,6 +454,7 @@ def _run_real_dataset_experiment(
         seed=seed,
         train_steps=train_steps,
         cv_window=50,
+        window_size=250,
     )
     result = run_bandit_experiment(
         scores_matrix, contexts, config,
