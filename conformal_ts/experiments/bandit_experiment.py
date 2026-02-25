@@ -609,10 +609,11 @@ def build_scores_matrix_from_series(
 
 def build_scores_matrix_with_cqr(
     series: np.ndarray,
-    lookback_windows: List[int],
+    lookback_windows: Optional[List[int]] = None,
     alpha: float = 0.10,
     min_history: int = 100,
     calibration_window: int = 50,
+    forecasters: Optional[List] = None,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """
     Build a (T', K) scores matrix using conformalized prediction intervals.
@@ -622,7 +623,8 @@ def build_scores_matrix_with_cqr(
     proper conformal intervals following the split-conformal / CQR
     philosophy:
 
-    1. Point forecast = rolling mean over the last *w_k* values.
+    1. Point forecast from either a :class:`ForecasterSpec` or a
+       rolling mean over the last *w_k* values.
     2. Residuals are collected in a rolling calibration set of size
        *calibration_window*.
     3. The prediction interval at time *t* is::
@@ -638,8 +640,9 @@ def build_scores_matrix_with_cqr(
     ----------
     series : ndarray, shape (T,)
         Raw univariate time series.
-    lookback_windows : list of int
+    lookback_windows : list of int, optional
         Each element defines a "spec" -- the lookback window length.
+        Used when *forecasters* is not provided (backward compat).
     alpha : float
         Miscoverage rate (default 0.10 for 90 % intervals).
     min_history : int
@@ -649,6 +652,11 @@ def build_scores_matrix_with_cqr(
     calibration_window : int
         Number of recent residuals used to compute the conformal
         quantile.  Default 50.
+    forecasters : list of ForecasterSpec, optional
+        When provided, use these diverse forecasters instead of
+        rolling-mean lookback windows.  Each forecaster's
+        ``forecast_all(series)`` is called once to pre-compute all
+        point forecasts.
 
     Returns
     -------
@@ -666,7 +674,19 @@ def build_scores_matrix_with_cqr(
     from collections import deque
 
     T = len(series)
-    K = len(lookback_windows)
+
+    # --- Determine K and pre-compute forecasts ---
+    if forecasters is not None:
+        K = len(forecasters)
+        all_forecasts = [fc.forecast_all(series) for fc in forecasters]
+    elif lookback_windows is not None:
+        K = len(lookback_windows)
+        all_forecasts = None
+    else:
+        raise ValueError(
+            "Either lookback_windows or forecasters must be provided."
+        )
+
     T_prime = T - min_history
 
     if T_prime <= 0:
@@ -712,9 +732,18 @@ def build_scores_matrix_with_cqr(
         contexts[idx] = ctx
 
         # --- score each spec ---
-        for k, w in enumerate(lookback_windows):
-            window = series[max(0, t - w):t]
-            mu = float(np.mean(window))
+        for k in range(K):
+            # Get point forecast
+            if all_forecasts is not None:
+                mu_val = all_forecasts[k][t]
+                if np.isnan(mu_val):
+                    # Forecaster can't produce a forecast yet; use last value
+                    mu_val = series[t - 1]
+                mu = float(mu_val)
+            else:
+                w = lookback_windows[k]
+                window = series[max(0, t - w):t]
+                mu = float(np.mean(window))
 
             # Conformal quantile from rolling residuals
             buf = residual_buffers[k]
@@ -728,7 +757,14 @@ def build_scores_matrix_with_cqr(
             else:
                 # Fallback: use std-based interval until calibration
                 # buffer fills up
-                sigma = float(np.std(window)) + 1e-8
+                if all_forecasts is not None:
+                    # Use recent residuals from the series itself
+                    recent = series[max(0, t - 50):t]
+                    sigma = float(np.std(recent)) + 1e-8
+                else:
+                    w = lookback_windows[k]
+                    window = series[max(0, t - w):t]
+                    sigma = float(np.std(window)) + 1e-8
                 from scipy.stats import norm as _norm
                 q = _norm.ppf(1 - alpha / 2) * sigma
 

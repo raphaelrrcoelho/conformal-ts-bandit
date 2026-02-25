@@ -401,12 +401,12 @@ def _run_real_dataset_experiment(
     """
     Run CTS + baselines on a real dataset with CQR-based conformal intervals.
 
-    Uses :meth:`RealDatasetLoader.prepare_raw_series` for the raw target,
-    :func:`build_scores_matrix_with_cqr` for proper conformal scoring
-    (with coverage tracking), and :meth:`RealDatasetLoader.build_context_features`
-    for the rich 13-dim context matrix.
+    Uses diverse forecasters (Naive, SeasonalNaive, RollingMean, SES,
+    LinearTrend) instead of 5 rolling-mean lookback windows, giving CTS
+    genuinely different failure modes to exploit.
     """
     from conformal_ts.data.real_datasets import RealDatasetLoader
+    from conformal_ts.forecasters import make_default_forecasters
     from conformal_ts.experiments.bandit_experiment import (
         BanditExperimentConfig,
         build_scores_matrix_with_cqr,
@@ -419,17 +419,27 @@ def _run_real_dataset_experiment(
         raise RuntimeError(f"Failed to load dataset: {dataset_name}")
 
     target = raw["target"]
-    lookback_windows = raw["lookback_windows"]
     warmup = raw["warmup"]
     df = raw["df"]
     config_ds = raw["config"]
 
-    # Build CQR scores matrix (conformal intervals + targets)
+    # Build diverse forecasters from dataset's seasonal period
+    seasonal_period = config_ds.seasonal_period or 24
+    forecasters = make_default_forecasters(
+        seasonal_period=seasonal_period,
+        rolling_window=50,
+        trend_window=20,
+    )
+
+    # Ensure min_history is sufficient for all forecasters
+    min_history = max(warmup, max(fc.min_history for fc in forecasters))
+
+    # Build CQR scores matrix with diverse forecasters
     scores_matrix, _cqr_ctx, targets, intervals = build_scores_matrix_with_cqr(
         target,
-        lookback_windows=lookback_windows,
+        forecasters=forecasters,
         alpha=0.10,
-        min_history=warmup,
+        min_history=min_history,
         calibration_window=50,
     )
 
@@ -437,7 +447,7 @@ def _run_real_dataset_experiment(
 
     # Build rich 13-dim context features
     contexts = RealDatasetLoader.build_context_features(
-        df, target, warmup, T, config_ds,
+        df, target, min_history, T, config_ds,
     )
 
     # Truncate to n_steps if requested

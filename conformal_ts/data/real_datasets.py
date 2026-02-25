@@ -94,6 +94,8 @@ class RealDatasetConfig:
     is_gzip: bool = False
     # If True, file has no header row (headerless CSV/TSV).
     no_header: bool = False
+    # Seasonal period (in native timesteps) for the seasonal naive forecaster.
+    seasonal_period: Optional[int] = None
 
 
 # ---------------------------------------------------------------------------
@@ -108,6 +110,7 @@ _REGISTRY: Dict[str, RealDatasetConfig] = {
         freq="H",
         description="Electricity Transformer Temperature -- station 1, hourly.",
         lookback_windows=[24, 48, 96, 168, 336],
+        seasonal_period=24,
     ),
     "ETTh2": RealDatasetConfig(
         name="ETTh2",
@@ -116,6 +119,7 @@ _REGISTRY: Dict[str, RealDatasetConfig] = {
         freq="H",
         description="Electricity Transformer Temperature -- station 2, hourly.",
         lookback_windows=[24, 48, 96, 168, 336],
+        seasonal_period=24,
     ),
     "Electricity": RealDatasetConfig(
         name="Electricity",
@@ -130,6 +134,7 @@ _REGISTRY: Dict[str, RealDatasetConfig] = {
         sample_clients=5,
         is_zip=True,
         zip_member="LD2011_2014.txt",
+        seasonal_period=96,
     ),
     "AustralianElecDemand": RealDatasetConfig(
         name="AustralianElecDemand",
@@ -138,6 +143,7 @@ _REGISTRY: Dict[str, RealDatasetConfig] = {
         freq="30min",
         description="Synthetic Australian-style half-hourly electricity demand.",
         lookback_windows=[48, 96, 192, 336, 672],  # Scaled for 30-min
+        seasonal_period=48,
     ),
     "ETTm1": RealDatasetConfig(
         name="ETTm1",
@@ -146,6 +152,7 @@ _REGISTRY: Dict[str, RealDatasetConfig] = {
         freq="15min",
         description="Electricity Transformer Temperature -- station 1, 15-min.",
         lookback_windows=[96, 192, 384, 672, 1344],
+        seasonal_period=96,
     ),
     "ETTm2": RealDatasetConfig(
         name="ETTm2",
@@ -154,6 +161,7 @@ _REGISTRY: Dict[str, RealDatasetConfig] = {
         freq="15min",
         description="Electricity Transformer Temperature -- station 2, 15-min.",
         lookback_windows=[96, 192, 384, 672, 1344],
+        seasonal_period=96,
     ),
     "ExchangeRate": RealDatasetConfig(
         name="ExchangeRate",
@@ -164,6 +172,7 @@ _REGISTRY: Dict[str, RealDatasetConfig] = {
         lookback_windows=[7, 14, 30, 60, 120],
         is_gzip=True,
         no_header=True,
+        seasonal_period=7,
     ),
     "Traffic": RealDatasetConfig(
         name="Traffic",
@@ -174,6 +183,7 @@ _REGISTRY: Dict[str, RealDatasetConfig] = {
         lookback_windows=[24, 48, 96, 168, 336],
         is_gzip=True,
         no_header=True,
+        seasonal_period=24,
     ),
 }
 
