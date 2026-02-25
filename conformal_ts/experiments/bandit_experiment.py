@@ -614,6 +614,7 @@ def build_scores_matrix_with_cqr(
     min_history: int = 100,
     calibration_window: int = 50,
     forecasters: Optional[List] = None,
+    calibration_windows: Optional[List[int]] = None,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """
     Build a (T', K) scores matrix using conformalized prediction intervals.
@@ -636,6 +637,23 @@ def build_scores_matrix_with_cqr(
     This guarantees approximate marginal coverage of ``1 - alpha`` once
     the calibration window is full, without Gaussianity assumptions.
 
+    Operating modes
+    ---------------
+    **Forecaster mode** (``forecasters`` provided, no ``calibration_windows``):
+        K = len(forecasters).  Each spec is a different point forecaster,
+        all sharing the same ``calibration_window``.
+
+    **Calibration-selection mode** (``calibration_windows`` provided):
+        K = len(calibration_windows).  A single ensemble point forecast
+        (mean of all ``forecasters``, or rolling-mean if none given) is
+        shared by every spec; the specs differ only in how many recent
+        residuals they use for the conformal quantile.  This lets the
+        bandit select the *adaptation speed* of the conformal calibration.
+
+    **Lookback mode** (``lookback_windows`` only, backward compat):
+        K = len(lookback_windows).  Rolling-mean point forecasts with
+        a shared ``calibration_window``.
+
     Parameters
     ----------
     series : ndarray, shape (T,)
@@ -651,12 +669,17 @@ def build_scores_matrix_with_cqr(
         window have data).  Default 100.
     calibration_window : int
         Number of recent residuals used to compute the conformal
-        quantile.  Default 50.
+        quantile.  Default 50.  Ignored when *calibration_windows*
+        is provided.
     forecasters : list of ForecasterSpec, optional
         When provided, use these diverse forecasters instead of
         rolling-mean lookback windows.  Each forecaster's
         ``forecast_all(series)`` is called once to pre-compute all
         point forecasts.
+    calibration_windows : list of int, optional
+        When provided, each element defines a spec whose conformal
+        quantile is computed over that many recent residuals.  All
+        specs share the same ensemble point forecast.
 
     Returns
     -------
@@ -675,16 +698,41 @@ def build_scores_matrix_with_cqr(
 
     T = len(series)
 
-    # --- Determine K and pre-compute forecasts ---
-    if forecasters is not None:
+    # --- Determine mode and pre-compute forecasts ---
+    calib_mode = calibration_windows is not None
+
+    if calib_mode:
+        # Calibration-selection mode: K = number of calibration windows,
+        # single ensemble point forecast.
+        K = len(calibration_windows)
+
+        if forecasters is not None:
+            all_fc_forecasts = [fc.forecast_all(series) for fc in forecasters]
+            # Ensemble = nanmean across forecasters at each timestep
+            stacked = np.column_stack(all_fc_forecasts)  # (T, n_fc)
+            with np.errstate(all="ignore"):
+                ensemble_forecast = np.nanmean(stacked, axis=1)  # (T,)
+        else:
+            # Fallback: rolling mean with window=50
+            ensemble_forecast = np.full(T, np.nan)
+            cs = np.concatenate(([0.0], np.cumsum(series)))
+            _w = 50
+            for _t in range(_w, T):
+                ensemble_forecast[_t] = (cs[_t] - cs[_t - _w]) / _w
+
+        all_forecasts = None  # not used per-spec
+    elif forecasters is not None:
         K = len(forecasters)
         all_forecasts = [fc.forecast_all(series) for fc in forecasters]
+        ensemble_forecast = None
     elif lookback_windows is not None:
         K = len(lookback_windows)
         all_forecasts = None
+        ensemble_forecast = None
     else:
         raise ValueError(
-            "Either lookback_windows or forecasters must be provided."
+            "Either lookback_windows, forecasters, or "
+            "calibration_windows must be provided."
         )
 
     T_prime = T - min_history
@@ -702,9 +750,14 @@ def build_scores_matrix_with_cqr(
     intervals_arr = np.zeros((T_prime, K, 2))
 
     # Per-spec rolling residual buffers for conformal calibration
-    residual_buffers: List[deque] = [
-        deque(maxlen=calibration_window) for _ in range(K)
-    ]
+    if calib_mode:
+        residual_buffers: List[deque] = [
+            deque(maxlen=cw) for cw in calibration_windows
+        ]
+    else:
+        residual_buffers = [
+            deque(maxlen=calibration_window) for _ in range(K)
+        ]
 
     for idx in range(T_prime):
         t = min_history + idx
@@ -734,7 +787,12 @@ def build_scores_matrix_with_cqr(
         # --- score each spec ---
         for k in range(K):
             # Get point forecast
-            if all_forecasts is not None:
+            if calib_mode:
+                mu_val = ensemble_forecast[t]
+                if np.isnan(mu_val):
+                    mu_val = series[t - 1]
+                mu = float(mu_val)
+            elif all_forecasts is not None:
                 mu_val = all_forecasts[k][t]
                 if np.isnan(mu_val):
                     # Forecaster can't produce a forecast yet; use last value
@@ -757,7 +815,7 @@ def build_scores_matrix_with_cqr(
             else:
                 # Fallback: use std-based interval until calibration
                 # buffer fills up
-                if all_forecasts is not None:
+                if calib_mode or all_forecasts is not None:
                     # Use recent residuals from the series itself
                     recent = series[max(0, t - 50):t]
                     sigma = float(np.std(recent)) + 1e-8

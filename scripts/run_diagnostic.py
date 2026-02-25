@@ -423,7 +423,7 @@ def _run_real_dataset_experiment(
     df = raw["df"]
     config_ds = raw["config"]
 
-    # Build diverse forecasters from dataset's seasonal period.
+    # Build diverse forecasters for the ensemble point forecast.
     # Use horizon = seasonal_period (1 full cycle ahead) so that
     # Naive no longer dominates on smooth high-frequency series.
     seasonal_period = config_ds.seasonal_period or 24
@@ -434,20 +434,31 @@ def _run_real_dataset_experiment(
         trend_window=20,
         horizon=horizon,
     )
+
+    # Calibration-selection mode: specs differ in the adaptation speed
+    # of the conformal quantile, not the point forecaster.  Short
+    # windows adapt fast (good after distribution shifts), long windows
+    # are more stable (good when data is stationary).
+    calib_windows = [25, 50, 100, 200, 500]
     logger.info(
-        f"  {dataset_name}: horizon={horizon}, seasonal_period={seasonal_period}"
+        f"  {dataset_name}: horizon={horizon}, calib_windows={calib_windows}"
     )
 
-    # Ensure min_history is sufficient for all forecasters
-    min_history = max(warmup, max(fc.min_history for fc in forecasters))
+    # Ensure min_history is sufficient for all forecasters and the
+    # largest calibration window
+    min_history = max(
+        warmup,
+        max(fc.min_history for fc in forecasters),
+        max(calib_windows),
+    )
 
-    # Build CQR scores matrix with diverse forecasters
+    # Build CQR scores matrix — bandit selects calibration window
     scores_matrix, _cqr_ctx, targets, intervals = build_scores_matrix_with_cqr(
         target,
         forecasters=forecasters,
         alpha=0.10,
         min_history=min_history,
-        calibration_window=50,
+        calibration_windows=calib_windows,
     )
 
     T = scores_matrix.shape[0]
