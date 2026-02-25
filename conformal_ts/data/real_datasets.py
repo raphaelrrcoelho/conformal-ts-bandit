@@ -43,6 +43,7 @@ Zhou et al. (2021) "Informer: Beyond Efficient Transformer for Long
 Sequence Time-Series Forecasting", AAAI.
 """
 
+import gzip
 import io
 import logging
 import zipfile
@@ -89,6 +90,10 @@ class RealDatasetConfig:
     is_zip: bool = False
     # Filename inside the zip (if applicable).
     zip_member: Optional[str] = None
+    # Whether the URL points to a gzip file.
+    is_gzip: bool = False
+    # If True, file has no header row (headerless CSV/TSV).
+    no_header: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -141,6 +146,42 @@ _REGISTRY: Dict[str, RealDatasetConfig] = {
         freq="15min",
         description="Meteorological indicators at 15-min resolution (ETTm1 proxy).",
         lookback_windows=[96, 192, 384, 672, 1344],  # Scaled for 15-min
+    ),
+    "ETTm1": RealDatasetConfig(
+        name="ETTm1",
+        url="https://raw.githubusercontent.com/zhouhaoyi/ETDataset/main/ETT-small/ETTm1.csv",
+        target_col="OT",
+        freq="15min",
+        description="Electricity Transformer Temperature -- station 1, 15-min.",
+        lookback_windows=[96, 192, 384, 672, 1344],
+    ),
+    "ETTm2": RealDatasetConfig(
+        name="ETTm2",
+        url="https://raw.githubusercontent.com/zhouhaoyi/ETDataset/main/ETT-small/ETTm2.csv",
+        target_col="OT",
+        freq="15min",
+        description="Electricity Transformer Temperature -- station 2, 15-min.",
+        lookback_windows=[96, 192, 384, 672, 1344],
+    ),
+    "ExchangeRate": RealDatasetConfig(
+        name="ExchangeRate",
+        url="https://raw.githubusercontent.com/laiguokun/multivariate-time-series-data/master/exchange_rate/exchange_rate.txt.gz",
+        target_col="col_0",
+        freq="D",
+        description="Daily exchange rates of 8 countries, 1990-2016.",
+        lookback_windows=[7, 14, 30, 60, 120],
+        is_gzip=True,
+        no_header=True,
+    ),
+    "Traffic": RealDatasetConfig(
+        name="Traffic",
+        url="https://raw.githubusercontent.com/laiguokun/multivariate-time-series-data/master/traffic/traffic.txt.gz",
+        target_col="col_0",
+        freq="H",
+        description="California freeway occupancy rates, 862 sensors, hourly.",
+        lookback_windows=[24, 48, 96, 168, 336],
+        is_gzip=True,
+        no_header=True,
     ),
 }
 
@@ -421,19 +462,29 @@ class RealDatasetLoader:
                 with zf.open(member) as f:
                     raw_bytes = f.read()
 
+        if config.is_gzip:
+            raw_bytes = gzip.decompress(raw_bytes)
+
         # Parse CSV
         text = raw_bytes.decode("utf-8", errors="replace")
+        header_arg = None if config.no_header else config.header
         df = pd.read_csv(
             io.StringIO(text),
             sep=config.separator,
             decimal=config.decimal,
-            header=config.header,
+            header=header_arg,
             low_memory=False,
         )
+
+        # Auto-name columns for headerless files
+        if config.no_header:
+            df.columns = [f"col_{i}" for i in range(len(df.columns))]
 
         # Post-process per dataset
         if config.name == "Electricity":
             df = self._process_electricity(df, config)
+        elif config.no_header:
+            df = self._process_headerless(df, config)
         else:
             df = self._process_generic(df, config)
 
@@ -466,6 +517,26 @@ class RealDatasetLoader:
 
         # Forward-fill small gaps, then drop remaining NaN rows
         df = df.ffill(limit=4).dropna()
+
+        return df
+
+    @staticmethod
+    def _process_headerless(
+        df: pd.DataFrame, config: RealDatasetConfig
+    ) -> pd.DataFrame:
+        """Process headerless numeric files (exchange_rate, traffic).
+
+        These have no date column -- we synthesize a DatetimeIndex from
+        the configured frequency so downstream code works uniformly.
+        """
+        df = df.select_dtypes(include=[np.number])
+        df = df.dropna(how="all")
+
+        # Synthesize datetime index
+        freq_map = {"D": "D", "H": "h", "15min": "15min", "30min": "30min"}
+        pd_freq = freq_map.get(config.freq, "h")
+        df.index = pd.date_range("2000-01-01", periods=len(df), freq=pd_freq)
+        df.index.name = "date"
 
         return df
 

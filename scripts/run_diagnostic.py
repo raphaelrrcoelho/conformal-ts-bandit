@@ -59,13 +59,21 @@ AVAILABLE_DATASETS = [
     "synthetic_low",     # Low non-stationarity (very persistent regimes)
     "gefcom_solar",      # GEFCom2014 solar track (synthetic fallback)
     "gefcom_wind",       # GEFCom2014 wind track (synthetic fallback)
-    "ETTh1",             # Electricity Transformer Temperature (station 1)
-    "ETTh2",             # Electricity Transformer Temperature (station 2)
+    "ETTh1",             # Electricity Transformer Temperature (station 1, hourly)
+    "ETTh2",             # Electricity Transformer Temperature (station 2, hourly)
+    "ETTm1",             # Electricity Transformer Temperature (station 1, 15-min)
+    "ETTm2",             # Electricity Transformer Temperature (station 2, 15-min)
     "Weather",           # Meteorological indicators
+    "ExchangeRate",      # Daily exchange rates of 8 countries
+    "Traffic",           # California freeway occupancy rates
 ]
 
 # Real datasets handled by the RealDatasetLoader
-_REAL_DATASET_NAMES = {"ETTh1", "ETTh2", "Weather", "Electricity", "AustralianElecDemand"}
+_REAL_DATASET_NAMES = {
+    "ETTh1", "ETTh2", "ETTm1", "ETTm2",
+    "Weather", "Electricity", "AustralianElecDemand",
+    "ExchangeRate", "Traffic",
+}
 
 
 # ---------------------------------------------------------------------------
@@ -161,7 +169,7 @@ def _run_synthetic_experiment(
         seed=seed,
         train_steps=train_steps,
         cv_window=50,
-        window_size=250,
+        window_size=100,
     )
     result = run_bandit_experiment(
         scores_matrix, contexts, config,
@@ -283,7 +291,7 @@ def _run_gefcom_experiment(
         seed=seed,
         train_steps=train_steps,
         cv_window=50,
-        window_size=250,
+        window_size=100,
     )
     result = run_bandit_experiment(scores_matrix, contexts, config)
 
@@ -454,7 +462,7 @@ def _run_real_dataset_experiment(
         seed=seed,
         train_steps=train_steps,
         cv_window=50,
-        window_size=250,
+        window_size=100,
     )
     result = run_bandit_experiment(
         scores_matrix, contexts, config,
