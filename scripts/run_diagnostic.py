@@ -100,6 +100,24 @@ class DatasetResult:
     aci_mean_score: float = 0.0
     best_fixed_mean_score: float = 0.0     # Best single spec in hindsight
 
+    # New conformal baselines
+    agaci_mean_score: float = 0.0
+    faci_mean_score: float = 0.0
+    cts_cg_mean_score: float = 0.0
+
+    # Coverage for all methods
+    aci_coverage: float = 0.0
+    agaci_coverage: float = 0.0
+    faci_coverage: float = 0.0
+    cts_cg_coverage: float = 0.0
+
+    # Mean interval widths
+    cts_mean_width: float = 0.0
+    aci_mean_width: float = 0.0
+    agaci_mean_width: float = 0.0
+    faci_mean_width: float = 0.0
+    cts_cg_mean_width: float = 0.0
+
     # Multi-seed confidence intervals and significance (None when n_seeds == 1)
     cts_score_ci: Optional[Tuple[float, float]] = None
     fixed_score_ci: Optional[Tuple[float, float]] = None
@@ -148,7 +166,7 @@ def _run_synthetic_experiment(
     )
 
     # 2. Build scores matrix with CQR-based conformal intervals
-    scores_matrix, contexts, targets, intervals = build_scores_matrix_with_cqr(
+    scores_matrix, contexts, targets, intervals, point_forecasts = build_scores_matrix_with_cqr(
         series,
         lookback_windows=lookback_windows,
         alpha=0.10,
@@ -173,6 +191,7 @@ def _run_synthetic_experiment(
     result = run_bandit_experiment(
         scores_matrix, contexts, config,
         targets=targets, intervals_matrix=intervals,
+        point_forecasts=point_forecasts,
     )
 
     return _build_result_dict(result, num_specs)
@@ -196,6 +215,14 @@ def _build_result_dict(result, num_specs: int) -> Dict[str, Any]:
     }
     if result.cts_covered is not None:
         d["cts_covered"] = result.cts_covered
+    # New baselines
+    for attr in ["agaci_scores", "agaci_covered", "agaci_widths",
+                 "faci_scores", "faci_covered", "faci_widths",
+                 "cts_cg_scores", "cts_cg_covered", "cts_cg_widths",
+                 "cts_widths", "aci_widths", "aci_covered"]:
+        val = getattr(result, attr, None)
+        if val is not None:
+            d[attr] = val
     return d
 
 
@@ -250,9 +277,16 @@ def _run_gefcom_experiment(
     end_idx = min(start_idx + n_steps, len(power_df) - max_horizon - 1)
     actual_steps = end_idx - start_idx
 
-    # --- Pre-build the scores matrix and contexts ---
+    # --- Pre-build the scores matrix, contexts, targets, and intervals ---
+    # Use a single fixed horizon (min across specs) so that all specs
+    # predict the same future target.  This makes coverage meaningful.
+    fixed_horizon = min(s["forecast_horizon"] for s in specs)
+
     scores_matrix = np.zeros((actual_steps, num_specs))
     contexts = np.zeros((actual_steps, feature_dim))
+    targets = np.zeros(actual_steps)
+    intervals_matrix = np.zeros((actual_steps, num_specs, 2))
+    point_forecasts = np.zeros(actual_steps)
 
     for step, i in enumerate(range(start_idx, end_idx)):
         ts = power_df.index[i]
@@ -260,11 +294,15 @@ def _run_gefcom_experiment(
             power_df[zone_col], ts, 1, "full", 168,
         )
 
+        # All specs predict the same target at fixed_horizon
+        t_idx = min(i + fixed_horizon, len(power_df) - 1)
+        target_val = float(power_df.iloc[t_idx][zone_col])
+        targets[step] = target_val
+
+        # Point forecast: mean of lookback values across all specs
+        pf_sum, pf_count = 0.0, 0
         for sp_idx, sp in enumerate(specs):
-            h = sp["forecast_horizon"]
             lookback = sp["lookback_hours"]
-            t_idx = min(i + h, len(power_df) - 1)
-            target_val = float(power_df.iloc[t_idx][zone_col])
 
             lookback_vals = power_df[zone_col].iloc[max(0, i - lookback):i].values
             if len(lookback_vals) > 1:
@@ -275,9 +313,15 @@ def _run_gefcom_experiment(
                 sigma = 1.0
             lower_k = mu - 1.645 * sigma
             upper_k = mu + 1.645 * sigma
+            intervals_matrix[step, sp_idx, 0] = lower_k
+            intervals_matrix[step, sp_idx, 1] = upper_k
             scores_matrix[step, sp_idx] = interval_score(
                 np.array([lower_k]), np.array([upper_k]), np.array([target_val])
             )[0]
+            pf_sum += mu
+            pf_count += 1
+
+        point_forecasts[step] = pf_sum / pf_count
 
     # --- Run the bandit competition with train/test split ---
     train_steps = min(50, actual_steps // 5)
@@ -292,7 +336,11 @@ def _run_gefcom_experiment(
         cv_window=50,
         window_size=100,
     )
-    result = run_bandit_experiment(scores_matrix, contexts, config)
+    result = run_bandit_experiment(
+        scores_matrix, contexts, config,
+        targets=targets, intervals_matrix=intervals_matrix,
+        point_forecasts=point_forecasts,
+    )
 
     return _build_result_dict(result, num_specs)
 
@@ -453,7 +501,7 @@ def _run_real_dataset_experiment(
     )
 
     # Build CQR scores matrix — bandit selects calibration window
-    scores_matrix, _cqr_ctx, targets, intervals = build_scores_matrix_with_cqr(
+    scores_matrix, _cqr_ctx, targets, intervals, point_forecasts = build_scores_matrix_with_cqr(
         target,
         forecasters=forecasters,
         alpha=0.10,
@@ -474,6 +522,8 @@ def _run_real_dataset_experiment(
         contexts = contexts[:n_steps]
         targets = targets[:n_steps]
         intervals = intervals[:n_steps]
+        if point_forecasts is not None:
+            point_forecasts = point_forecasts[:n_steps]
         T = n_steps
 
     num_specs = scores_matrix.shape[1]
@@ -494,6 +544,7 @@ def _run_real_dataset_experiment(
     result = run_bandit_experiment(
         scores_matrix, contexts, config,
         targets=targets, intervals_matrix=intervals,
+        point_forecasts=point_forecasts,
     )
 
     return _build_result_dict(result, num_specs)
@@ -553,9 +604,25 @@ def run_single_dataset(
     aci_mean = float(np.mean(raw.get("aci_scores", [0.0])))
     best_fixed_mean = float(np.mean(raw.get("best_fixed_scores", raw["fixed_scores"])))
 
+    # New baselines
+    agaci_mean = float(np.mean(raw["agaci_scores"])) if "agaci_scores" in raw else 0.0
+    faci_mean = float(np.mean(raw["faci_scores"])) if "faci_scores" in raw else 0.0
+    cts_cg_mean = float(np.mean(raw["cts_cg_scores"])) if "cts_cg_scores" in raw else 0.0
+
     # Coverage
     covered = raw.get("cts_covered")
     coverage = float(np.mean(covered)) if covered is not None else 0.0
+    aci_cov = float(np.mean(raw["aci_covered"])) if "aci_covered" in raw else 0.0
+    agaci_cov = float(np.mean(raw["agaci_covered"])) if "agaci_covered" in raw else 0.0
+    faci_cov = float(np.mean(raw["faci_covered"])) if "faci_covered" in raw else 0.0
+    cts_cg_cov = float(np.mean(raw["cts_cg_covered"])) if "cts_cg_covered" in raw else 0.0
+
+    # Widths
+    cts_w = float(np.mean(raw["cts_widths"])) if "cts_widths" in raw else 0.0
+    aci_w = float(np.mean(raw["aci_widths"])) if "aci_widths" in raw else 0.0
+    agaci_w = float(np.mean(raw["agaci_widths"])) if "agaci_widths" in raw else 0.0
+    faci_w = float(np.mean(raw["faci_widths"])) if "faci_widths" in raw else 0.0
+    cts_cg_w = float(np.mean(raw["cts_cg_widths"])) if "cts_cg_widths" in raw else 0.0
 
     # Improvement percentages (lower score is better)
     imp_fixed = 100.0 * (fixed_mean - cts_mean) / (fixed_mean + 1e-12)
@@ -576,6 +643,18 @@ def run_single_dataset(
         nonstationarity_details=ns,
         aci_mean_score=aci_mean,
         best_fixed_mean_score=best_fixed_mean,
+        agaci_mean_score=agaci_mean,
+        faci_mean_score=faci_mean,
+        cts_cg_mean_score=cts_cg_mean,
+        aci_coverage=aci_cov,
+        agaci_coverage=agaci_cov,
+        faci_coverage=faci_cov,
+        cts_cg_coverage=cts_cg_cov,
+        cts_mean_width=cts_w,
+        aci_mean_width=aci_w,
+        agaci_mean_width=agaci_w,
+        faci_mean_width=faci_w,
+        cts_cg_mean_width=cts_cg_w,
         n_seeds=1,
     )
 
@@ -731,7 +810,19 @@ def run_dataset_multi_seed(
     per_seed_rand_means: List[float] = []
     per_seed_aci_means: List[float] = []
     per_seed_best_fixed_means: List[float] = []
+    per_seed_agaci_means: List[float] = []
+    per_seed_faci_means: List[float] = []
+    per_seed_cts_cg_means: List[float] = []
     per_seed_coverage: List[float] = []
+    per_seed_aci_cov: List[float] = []
+    per_seed_agaci_cov: List[float] = []
+    per_seed_faci_cov: List[float] = []
+    per_seed_cts_cg_cov: List[float] = []
+    per_seed_cts_w: List[float] = []
+    per_seed_aci_w: List[float] = []
+    per_seed_agaci_w: List[float] = []
+    per_seed_faci_w: List[float] = []
+    per_seed_cts_cg_w: List[float] = []
     per_seed_ns: List[float] = []
     per_seed_imp: List[float] = []
     ns_details_accum: Dict[str, List[float]] = {}
@@ -753,6 +844,9 @@ def run_dataset_multi_seed(
         rand_m = float(np.mean(raw["random_scores"])) if len(raw["random_scores"]) > 0 else 0.0
         aci_m = float(np.mean(raw.get("aci_scores", [0.0])))
         best_fixed_m = float(np.mean(raw.get("best_fixed_scores", raw["fixed_scores"])))
+        agaci_m = float(np.mean(raw["agaci_scores"])) if "agaci_scores" in raw else 0.0
+        faci_m = float(np.mean(raw["faci_scores"])) if "faci_scores" in raw else 0.0
+        cts_cg_m = float(np.mean(raw["cts_cg_scores"])) if "cts_cg_scores" in raw else 0.0
 
         per_seed_cts_means.append(cts_m)
         per_seed_fixed_means.append(fixed_m)
@@ -760,10 +854,24 @@ def run_dataset_multi_seed(
         per_seed_rand_means.append(rand_m)
         per_seed_aci_means.append(aci_m)
         per_seed_best_fixed_means.append(best_fixed_m)
+        per_seed_agaci_means.append(agaci_m)
+        per_seed_faci_means.append(faci_m)
+        per_seed_cts_cg_means.append(cts_cg_m)
 
         # Coverage
         covered = raw.get("cts_covered")
         per_seed_coverage.append(float(np.mean(covered)) if covered is not None else 0.0)
+        per_seed_aci_cov.append(float(np.mean(raw["aci_covered"])) if "aci_covered" in raw else 0.0)
+        per_seed_agaci_cov.append(float(np.mean(raw["agaci_covered"])) if "agaci_covered" in raw else 0.0)
+        per_seed_faci_cov.append(float(np.mean(raw["faci_covered"])) if "faci_covered" in raw else 0.0)
+        per_seed_cts_cg_cov.append(float(np.mean(raw["cts_cg_covered"])) if "cts_cg_covered" in raw else 0.0)
+
+        # Widths
+        per_seed_cts_w.append(float(np.mean(raw["cts_widths"])) if "cts_widths" in raw else 0.0)
+        per_seed_aci_w.append(float(np.mean(raw["aci_widths"])) if "aci_widths" in raw else 0.0)
+        per_seed_agaci_w.append(float(np.mean(raw["agaci_widths"])) if "agaci_widths" in raw else 0.0)
+        per_seed_faci_w.append(float(np.mean(raw["faci_widths"])) if "faci_widths" in raw else 0.0)
+        per_seed_cts_cg_w.append(float(np.mean(raw["cts_cg_widths"])) if "cts_cg_widths" in raw else 0.0)
 
         imp = 100.0 * (fixed_m - cts_m) / (fixed_m + 1e-12)
         per_seed_imp.append(imp)
@@ -791,7 +899,19 @@ def run_dataset_multi_seed(
     rand_mean = float(np.mean(per_seed_rand_means))
     aci_mean = float(np.mean(per_seed_aci_means))
     best_fixed_mean = float(np.mean(per_seed_best_fixed_means))
+    agaci_mean = float(np.mean(per_seed_agaci_means))
+    faci_mean = float(np.mean(per_seed_faci_means))
+    cts_cg_mean = float(np.mean(per_seed_cts_cg_means))
     coverage_mean = float(np.mean(per_seed_coverage))
+    aci_cov_mean = float(np.mean(per_seed_aci_cov))
+    agaci_cov_mean = float(np.mean(per_seed_agaci_cov))
+    faci_cov_mean = float(np.mean(per_seed_faci_cov))
+    cts_cg_cov_mean = float(np.mean(per_seed_cts_cg_cov))
+    cts_w_mean = float(np.mean(per_seed_cts_w))
+    aci_w_mean = float(np.mean(per_seed_aci_w))
+    agaci_w_mean = float(np.mean(per_seed_agaci_w))
+    faci_w_mean = float(np.mean(per_seed_faci_w))
+    cts_cg_w_mean = float(np.mean(per_seed_cts_cg_w))
     imp_fixed = float(np.mean(per_seed_imp))
     imp_ens = 100.0 * (ens_mean - cts_mean) / (ens_mean + 1e-12)
     ns_index = float(np.mean(per_seed_ns))
@@ -828,6 +948,18 @@ def run_dataset_multi_seed(
         nonstationarity_details=ns_details_mean,
         aci_mean_score=aci_mean,
         best_fixed_mean_score=best_fixed_mean,
+        agaci_mean_score=agaci_mean,
+        faci_mean_score=faci_mean,
+        cts_cg_mean_score=cts_cg_mean,
+        aci_coverage=aci_cov_mean,
+        agaci_coverage=agaci_cov_mean,
+        faci_coverage=faci_cov_mean,
+        cts_cg_coverage=cts_cg_cov_mean,
+        cts_mean_width=cts_w_mean,
+        aci_mean_width=aci_w_mean,
+        agaci_mean_width=agaci_w_mean,
+        faci_mean_width=faci_w_mean,
+        cts_cg_mean_width=cts_cg_w_mean,
         cts_score_ci=cts_ci,
         fixed_score_ci=fixed_ci,
         improvement_ci=imp_ci,
@@ -894,85 +1026,103 @@ def print_summary_table(results: List[DatasetResult], correlation: Dict[str, Any
     """Print a formatted summary table to stdout."""
     has_ci = any(r.cts_score_ci is not None for r in results)
     has_coverage = any(r.cts_coverage > 0 for r in results)
+    has_new_baselines = any(r.agaci_mean_score > 0 for r in results)
 
-    if has_ci:
-        header = (
-            f"{'Dataset':<18s} {'NS':>6s} "
-            f"{'CTS (95% CI)':>22s} "
-            f"{'CV-Fixed (95% CI)':>22s} "
-            f"{'ACI':>9s} "
-            f"{'Imp%':>10s} {'DM p':>8s}"
-        )
-        if has_coverage:
-            header += f" {'Cov':>6s}"
-    else:
-        header = (
-            f"{'Dataset':<18s} {'NS':>6s} {'CTS':>9s} {'CV-Fixed':>9s} "
-            f"{'ACI':>9s} {'Ensemble':>9s} {'Imp%':>10s} {'Steps':>6s} {'Time':>6s}"
-        )
-        if has_coverage:
-            header += f" {'Cov':>6s}"
+    sorted_results = sorted(results, key=lambda x: -x.nonstationarity_index)
 
-    sep = "-" * len(header)
-
+    # ---- Table 1: Interval Scores ----
     print()
-    print("=" * len(header))
-    print("  Diagnostic Summary: Non-Stationarity vs CTS Improvement")
+    width = 105
+    print("=" * width)
+    print("  Table 1: Interval Scores (lower is better)")
     if has_ci:
         n_seeds = results[0].n_seeds if results else 0
         print(f"  ({n_seeds} seeds per dataset, 95% bootstrap CIs)")
-    print(f"  Baseline: CV-Fixed (rolling cross-validated best spec)")
-    print("=" * len(header))
-    print(header)
-    print(sep)
+    print("=" * width)
 
-    for r in sorted(results, key=lambda x: -x.nonstationarity_index):
-        if has_ci:
-            cts_str = _fmt_score_ci(r.cts_mean_score, r.cts_score_ci)
-            fixed_str = _fmt_score_ci(r.fixed_mean_score, r.fixed_score_ci)
+    if has_new_baselines:
+        header1 = (
+            f"{'Dataset':<16s} {'CTS-CG':>9s} {'ACI':>9s} {'AgACI':>9s} "
+            f"{'FACI':>9s} {'CTS':>9s} {'CV-Fixed':>9s} {'Imp%':>8s}"
+        )
+    else:
+        header1 = (
+            f"{'Dataset':<16s} {'CTS':>9s} {'CV-Fixed':>9s} "
+            f"{'ACI':>9s} {'Ensemble':>9s} {'Imp%':>8s}"
+        )
+    print(header1)
+    print("-" * len(header1))
 
-            # Improvement with significance stars
-            stars = _significance_stars(r.dm_pvalue) if r.dm_pvalue is not None else ""
-            imp_str = f"{r.improvement_over_fixed_pct:+.1f}%{stars}"
+    for r in sorted_results:
+        imp_str = f"{r.improvement_over_fixed_pct:+.1f}%"
+        if has_ci and r.dm_pvalue is not None:
+            imp_str += _significance_stars(r.dm_pvalue)
 
-            dm_p_str = f"{r.dm_pvalue:.3f}" if r.dm_pvalue is not None else "N/A"
-
+        if has_new_baselines:
             line = (
-                f"{r.dataset_name:<18s} "
-                f"{r.nonstationarity_index:>6.3f} "
-                f"{cts_str:>22s} "
-                f"{fixed_str:>22s} "
+                f"{r.dataset_name:<16s} "
+                f"{r.cts_cg_mean_score:>9.3f} "
                 f"{r.aci_mean_score:>9.3f} "
-                f"{imp_str:>10s} "
-                f"{dm_p_str:>8s}"
+                f"{r.agaci_mean_score:>9.3f} "
+                f"{r.faci_mean_score:>9.3f} "
+                f"{r.cts_mean_score:>9.3f} "
+                f"{r.fixed_mean_score:>9.3f} "
+                f"{imp_str:>8s}"
             )
-            if has_coverage:
-                line += f" {r.cts_coverage:>5.1%}"
-            print(line)
         else:
             line = (
-                f"{r.dataset_name:<18s} "
-                f"{r.nonstationarity_index:>6.3f} "
+                f"{r.dataset_name:<16s} "
                 f"{r.cts_mean_score:>9.3f} "
                 f"{r.fixed_mean_score:>9.3f} "
                 f"{r.aci_mean_score:>9.3f} "
                 f"{r.ensemble_mean_score:>9.3f} "
-                f"{r.improvement_over_fixed_pct:>+10.1f}% "
-                f"{r.n_steps:>6d} "
-                f"{r.elapsed_seconds:>5.1f}s"
+                f"{imp_str:>8s}"
             )
-            if has_coverage:
-                line += f" {r.cts_coverage:>5.1%}"
+        print(line)
+
+    print()
+
+    # ---- Table 2: Efficiency (coverage + width) ----
+    if has_coverage and has_new_baselines:
+        print("=" * width)
+        print("  Table 2: Efficiency — Coverage (%) and Mean Interval Width")
+        print("=" * width)
+
+        header2 = (
+            f"{'Dataset':<16s} "
+            f"{'CTS-CG':>14s} {'ACI':>14s} {'AgACI':>14s} "
+            f"{'FACI':>14s} {'CTS':>14s}"
+        )
+        sub_header = (
+            f"{'':<16s} "
+            f"{'Cov   Width':>14s} {'Cov   Width':>14s} {'Cov   Width':>14s} "
+            f"{'Cov   Width':>14s} {'Cov   Width':>14s}"
+        )
+        print(header2)
+        print(sub_header)
+        print("-" * len(header2))
+
+        def _cov_width(cov: float, w: float) -> str:
+            return f"{cov:>5.1%} {w:>7.2f}"
+
+        for r in sorted_results:
+            line = (
+                f"{r.dataset_name:<16s} "
+                f"{_cov_width(r.cts_cg_coverage, r.cts_cg_mean_width):>14s} "
+                f"{_cov_width(r.aci_coverage, r.aci_mean_width):>14s} "
+                f"{_cov_width(r.agaci_coverage, r.agaci_mean_width):>14s} "
+                f"{_cov_width(r.faci_coverage, r.faci_mean_width):>14s} "
+                f"{_cov_width(r.cts_coverage, r.cts_mean_width):>14s}"
+            )
             print(line)
 
-    print(sep)
+        print()
 
-    # Print significance legend when CIs are present
+    # Significance legend
     if has_ci:
         print("  Significance: * p<0.05  ** p<0.01  *** p<0.001 (one-sided DM test)")
         print()
 
-    print()
     print("Correlation (NS Index vs CTS Improvement over CV-Fixed):")
     print(f"  Pearson  r = {correlation.get('pearson_r', float('nan')):.3f}  "
           f"(p = {correlation.get('pearson_p', float('nan')):.4f})")

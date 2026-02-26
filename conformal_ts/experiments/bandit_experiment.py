@@ -109,6 +109,19 @@ class BanditExperimentConfig:
     # Random Fourier Features dimension (None = no lifting).
     rff_dim: Optional[int] = None
 
+    # AgACI (Zaffran et al., ICML 2022)
+    agaci_gammas: List[float] = field(default_factory=lambda: [0.001, 0.005, 0.01, 0.05, 0.1])
+    agaci_eta: float = 0.1  # expert weight learning rate
+
+    # FACI (Gibbs & Candès, JMLR 2023)
+    faci_gamma_init: float = 0.01
+    faci_sigma: float = 0.01  # multiplicative update rate
+    faci_gamma_min: float = 0.001
+    faci_gamma_max: float = 0.2
+
+    # CTS-CG (CTS + coverage guarantee via ACI overlay)
+    cts_cg_gamma: float = 0.01
+
 
 # ---------------------------------------------------------------------------
 # Result container
@@ -142,6 +155,29 @@ class BanditExperimentResult:
 
     # Coverage tracking (optional, requires intervals_matrix)
     cts_covered: Optional[np.ndarray] = None  # (T,) bool: did CTS interval cover?
+
+    # Width tracking
+    cts_widths: Optional[np.ndarray] = None   # (T,) interval widths for CTS
+    aci_widths: Optional[np.ndarray] = None   # (T,) interval widths for ACI
+    aci_covered: Optional[np.ndarray] = None  # (T,) bool: did ACI interval cover?
+
+    # AgACI (Zaffran et al., ICML 2022)
+    agaci_scores: Optional[np.ndarray] = None
+    agaci_alpha_history: Optional[np.ndarray] = None
+    agaci_covered: Optional[np.ndarray] = None
+    agaci_widths: Optional[np.ndarray] = None
+
+    # FACI (Gibbs & Candès, JMLR 2023)
+    faci_scores: Optional[np.ndarray] = None
+    faci_alpha_history: Optional[np.ndarray] = None
+    faci_covered: Optional[np.ndarray] = None
+    faci_widths: Optional[np.ndarray] = None
+
+    # CTS-CG (CTS + coverage guarantee)
+    cts_cg_scores: Optional[np.ndarray] = None
+    cts_cg_alpha_history: Optional[np.ndarray] = None
+    cts_cg_covered: Optional[np.ndarray] = None
+    cts_cg_widths: Optional[np.ndarray] = None
 
     def best_fixed_scores(self) -> np.ndarray:
         """Return scores for the best single fixed spec (in hindsight)."""
@@ -195,6 +231,24 @@ class BanditExperimentResult:
         }
         if self.cts_covered is not None:
             result["cts_coverage"] = float(np.mean(self.cts_covered))
+        if self.aci_covered is not None:
+            result["aci_coverage"] = float(np.mean(self.aci_covered))
+        # Width metrics
+        for name, arr in [("cts", self.cts_widths), ("aci", self.aci_widths),
+                          ("agaci", self.agaci_widths), ("faci", self.faci_widths),
+                          ("cts_cg", self.cts_cg_widths)]:
+            if arr is not None:
+                result[f"{name}_mean_width"] = float(np.mean(arr))
+        # New baselines
+        for name, scores, covered in [
+            ("agaci", self.agaci_scores, self.agaci_covered),
+            ("faci", self.faci_scores, self.faci_covered),
+            ("cts_cg", self.cts_cg_scores, self.cts_cg_covered),
+        ]:
+            if scores is not None:
+                result[f"{name}_mean"] = float(np.mean(scores))
+            if covered is not None:
+                result[f"{name}_coverage"] = float(np.mean(covered))
         for k, scores in self.fixed_scores.items():
             result[f"fixed_{k}_mean"] = float(np.mean(scores))
         return result
@@ -210,6 +264,7 @@ def run_bandit_experiment(
     config: BanditExperimentConfig,
     targets: Optional[np.ndarray] = None,
     intervals_matrix: Optional[np.ndarray] = None,
+    point_forecasts: Optional[np.ndarray] = None,
 ) -> BanditExperimentResult:
     """
     Run the bandit specification selection competition.
@@ -228,6 +283,13 @@ def run_bandit_experiment(
       with the lowest average score in a rolling validation window.
     - **ACI** : Adaptive Conformal Inference (Gibbs & Candès, 2021) --
       uses spec 0 but adapts the miscoverage level alpha over time.
+    - **AgACI** : Aggregated ACI (Zaffran et al., ICML 2022) --
+      K experts with different gamma values, aggregated via exponential
+      weights.
+    - **FACI** : Fully Adaptive CI (Gibbs & Candès, JMLR 2023) --
+      ACI with adaptive gamma via multiplicative updates.
+    - **CTS-CG** : CTS with Coverage Guarantee -- CTS spec selection
+      overlaid with ACI alpha adaptation for provable coverage.
     - **Random** : Uniform random selection each step.
     - **Ensemble** : Average score across all specs each step.
     - **Oracle** : Best spec at each step (lower bound on achievable
@@ -246,6 +308,9 @@ def run_bandit_experiment(
     intervals_matrix : ndarray, shape (T, K, 2), optional
         Lower/upper bounds per spec per timestep.  When provided together
         with *targets*, coverage is tracked for CTS's selected spec.
+    point_forecasts : ndarray, shape (T,), optional
+        Shared point forecast for ACI-family methods.  When None, falls
+        back to midpoint of spec-0 interval.
 
     Returns
     -------
@@ -327,7 +392,62 @@ def run_bandit_experiment(
     alpha_nominal = 0.10  # default nominal miscoverage
     alpha_t = alpha_nominal
     cv_window = config.cv_window
-    aci_residual_buffer: _deque = _deque(maxlen=50)
+
+    # Width / coverage arrays for ACI and CTS
+    aci_widths_full = np.zeros(T)
+    aci_covered_full = np.zeros(T, dtype=bool)
+    cts_widths_full = np.zeros(T)
+
+    # Shared residual buffer for all ACI-family methods (ACI, AgACI, FACI, CTS-CG).
+    # Residuals are y_t - pf_t, independent of each method's alpha.
+    residual_buffer: _deque = _deque(maxlen=50)
+
+    # Helper: get point forecast at time t
+    def _get_pf(t_idx: int) -> float:
+        if point_forecasts is not None:
+            pf = point_forecasts[t_idx]
+            if not np.isnan(pf):
+                return float(pf)
+        if intervals_matrix is not None:
+            return 0.5 * (intervals_matrix[t_idx, 0, 0] + intervals_matrix[t_idx, 0, 1])
+        return 0.0
+
+    # Helper: build ACI interval from residual buffer
+    def _build_aci_interval(pf_t: float, res_buf: _deque, alpha_curr: float,
+                            fallback_hw: float):
+        if len(res_buf) >= 2:
+            residuals = np.array(res_buf)
+            n_res = len(residuals)
+            q_idx = int(np.ceil((n_res + 1) * (1 - alpha_curr)))
+            q_idx = min(q_idx, n_res) - 1  # 0-indexed
+            q = float(np.sort(np.abs(residuals))[max(q_idx, 0)])
+        else:
+            q = fallback_hw
+        return (pf_t - q, pf_t + q)
+
+    # --- AgACI state (Zaffran et al., ICML 2022) ---
+    n_experts = len(config.agaci_gammas)
+    agaci_alpha_experts = np.full(n_experts, alpha_nominal)  # per-expert alpha_t
+    agaci_weights = np.ones(n_experts) / n_experts  # normalized weights
+    agaci_scores_full = np.zeros(T)
+    agaci_alpha_full = np.zeros(T)
+    agaci_covered_full = np.zeros(T, dtype=bool)
+    agaci_widths_full = np.zeros(T)
+
+    # --- FACI state (Gibbs & Candès, JMLR 2023) ---
+    faci_alpha_t = alpha_nominal
+    faci_gamma_t = config.faci_gamma_init
+    faci_scores_full = np.zeros(T)
+    faci_alpha_full = np.zeros(T)
+    faci_covered_full = np.zeros(T, dtype=bool)
+    faci_widths_full = np.zeros(T)
+
+    # --- CTS-CG state (CTS + coverage guarantee) ---
+    cts_cg_alpha_t = alpha_nominal
+    cts_cg_scores_full = np.zeros(T)
+    cts_cg_alpha_full = np.zeros(T)
+    cts_cg_covered_full = np.zeros(T, dtype=bool)
+    cts_cg_widths_full = np.zeros(T)
 
     # --- simulation loop ---
     for t in range(T):
@@ -360,11 +480,12 @@ def run_bandit_experiment(
             normalizer.update(val)
         bandit.update_all_arms(bandit_ctx, normalized, selected_action=cts_action)
 
-        # Coverage tracking for CTS
+        # Coverage + width tracking for CTS
         if track_coverage:
             lo = intervals_matrix[t, cts_action, 0]
             hi = intervals_matrix[t, cts_action, 1]
             cts_covered_full[t] = (lo <= targets[t] <= hi)
+            cts_widths_full[t] = hi - lo
 
         # Fixed baselines
         for k in range(K):
@@ -380,54 +501,133 @@ def run_bandit_experiment(
             cv_action = int(np.argmin(window_scores.mean(axis=0)))
         cv_fixed_scores_full[t] = row[cv_action]
 
-        # ACI baseline (Gibbs & Candès, 2021)
-        # Rebuild conformal interval at current alpha_t from rolling
-        # residuals, then score against the true target.
+        # --- Point forecast for ACI-family methods ---
+        pf_t = _get_pf(t)
+        fallback_hw = 0.5 * (intervals_matrix[t, 0, 1] - intervals_matrix[t, 0, 0]) if track_coverage else 1.0
+
+        # ===== ACI baseline (Gibbs & Candès, 2021) =====
         aci_alpha_full[t] = alpha_t
 
         if track_coverage:
-            # Use midpoint from spec-0 interval as point forecast
-            midpoint = 0.5 * (intervals_matrix[t, 0, 0] + intervals_matrix[t, 0, 1])
-
-            # Conformal quantile from rolling residuals
-            if len(aci_residual_buffer) >= 2:
-                residuals = np.array(aci_residual_buffer)
-                n_res = len(residuals)
-                q_idx = int(np.ceil((n_res + 1) * (1 - alpha_t)))
-                q_idx = min(q_idx, n_res) - 1  # 0-indexed
-                q = float(np.sort(np.abs(residuals))[max(q_idx, 0)])
-            else:
-                # Fallback: use spec-0 half-width until buffer fills
-                q = 0.5 * (intervals_matrix[t, 0, 1] - intervals_matrix[t, 0, 0])
-
-            aci_lo = midpoint - q
-            aci_hi = midpoint + q
+            aci_lo, aci_hi = _build_aci_interval(pf_t, residual_buffer, alpha_t, fallback_hw)
+            aci_widths_full[t] = aci_hi - aci_lo
             aci_scores_full[t] = _interval_score(
-                np.array([aci_lo]),
-                np.array([aci_hi]),
-                np.array([targets[t]]),
-                alpha=alpha_nominal,
+                np.array([aci_lo]), np.array([aci_hi]),
+                np.array([targets[t]]), alpha=alpha_nominal,
             )[0]
-
-            # Coverage check for alpha update
-            err_t = 0.0 if (aci_lo <= targets[t] <= aci_hi) else 1.0
-
-            # Update residual buffer AFTER scoring
-            aci_residual_buffer.append(targets[t] - midpoint)
+            aci_err_t = 0.0 if (aci_lo <= targets[t] <= aci_hi) else 1.0
+            aci_covered_full[t] = (aci_err_t == 0.0)
         else:
-            # No intervals available -- fall back to spec-0 score
             aci_scores_full[t] = row[0]
-            # Heuristic coverage from running median
             if t > 0:
                 past = scores_matrix[:t + 1, 0]
-                err_t = 0.0 if row[0] <= float(np.median(past)) else 1.0
+                aci_err_t = 0.0 if row[0] <= float(np.median(past)) else 1.0
             else:
-                err_t = 0.0
+                aci_err_t = 0.0
 
-        # Cumulative alpha update: alpha_{t+1} = alpha_t + gamma*(alpha - err_t)
-        alpha_t = alpha_t + config.aci_gamma * (alpha_nominal - err_t)
-        # Clamp to (0, 1)
+        alpha_t = alpha_t + config.aci_gamma * (alpha_nominal - aci_err_t)
         alpha_t = float(np.clip(alpha_t, 1e-6, 1.0 - 1e-6))
+
+        # ===== AgACI (Zaffran et al., ICML 2022) =====
+        # Aggregated alpha = weighted combination of expert alphas
+        agaci_alpha_agg = float(np.dot(agaci_weights, agaci_alpha_experts))
+        agaci_alpha_agg = float(np.clip(agaci_alpha_agg, 1e-6, 1.0 - 1e-6))
+        agaci_alpha_full[t] = agaci_alpha_agg
+
+        if track_coverage:
+            ag_lo, ag_hi = _build_aci_interval(pf_t, residual_buffer, agaci_alpha_agg, fallback_hw)
+            agaci_widths_full[t] = ag_hi - ag_lo
+            agaci_scores_full[t] = _interval_score(
+                np.array([ag_lo]), np.array([ag_hi]),
+                np.array([targets[t]]), alpha=alpha_nominal,
+            )[0]
+            ag_err = 0.0 if (ag_lo <= targets[t] <= ag_hi) else 1.0
+            agaci_covered_full[t] = (ag_err == 0.0)
+
+            # Update each expert's alpha and compute per-expert loss
+            y_t = targets[t]
+            for e in range(n_experts):
+                gamma_e = config.agaci_gammas[e]
+                # Per-expert interval for loss computation
+                e_lo, e_hi = _build_aci_interval(
+                    pf_t, residual_buffer, agaci_alpha_experts[e], fallback_hw
+                )
+                # Interval score as expert loss — differentiates experts
+                # by their actual interval quality (width + coverage penalty)
+                loss_e = _interval_score(
+                    np.array([e_lo]), np.array([e_hi]),
+                    np.array([y_t]), alpha=alpha_nominal,
+                )[0]
+                agaci_weights[e] *= np.exp(-config.agaci_eta * loss_e)
+                # Update expert alpha via ACI rule
+                e_err = 0.0 if (e_lo <= y_t <= e_hi) else 1.0
+                agaci_alpha_experts[e] += gamma_e * (alpha_nominal - e_err)
+                agaci_alpha_experts[e] = float(np.clip(agaci_alpha_experts[e], 1e-6, 1.0 - 1e-6))
+
+            # Renormalize weights
+            w_sum = agaci_weights.sum()
+            if w_sum > 0:
+                agaci_weights /= w_sum
+            else:
+                agaci_weights = np.ones(n_experts) / n_experts
+        else:
+            agaci_scores_full[t] = row[0]
+
+        # ===== FACI (Gibbs & Candès, JMLR 2023) =====
+        faci_alpha_full[t] = faci_alpha_t
+
+        if track_coverage:
+            f_lo, f_hi = _build_aci_interval(pf_t, residual_buffer, faci_alpha_t, fallback_hw)
+            faci_widths_full[t] = f_hi - f_lo
+            faci_scores_full[t] = _interval_score(
+                np.array([f_lo]), np.array([f_hi]),
+                np.array([targets[t]]), alpha=alpha_nominal,
+            )[0]
+            f_err = 0.0 if (f_lo <= targets[t] <= f_hi) else 1.0
+            faci_covered_full[t] = (f_err == 0.0)
+
+            # Save pre-update alpha for gradient computation
+            faci_alpha_pre = faci_alpha_t
+
+            # Update alpha
+            faci_alpha_t = faci_alpha_t + faci_gamma_t * (alpha_nominal - f_err)
+            faci_alpha_t = float(np.clip(faci_alpha_t, 1e-6, 1.0 - 1e-6))
+
+            # Adaptive gamma update (Gibbs & Candès, JMLR 2023, Algorithm 2)
+            # gradient = -(alpha - err_t) * (alpha_t_pre - alpha) / gamma_t
+            gradient_t = -(alpha_nominal - f_err) * (faci_alpha_pre - alpha_nominal) / (faci_gamma_t + 1e-8)
+            faci_gamma_t = faci_gamma_t * np.exp(-config.faci_sigma * gradient_t)
+            faci_gamma_t = float(np.clip(faci_gamma_t, config.faci_gamma_min, config.faci_gamma_max))
+        else:
+            faci_scores_full[t] = row[0]
+
+        # ===== CTS-CG (CTS + coverage guarantee) =====
+        # CTS selects the spec; ACI alpha adaptation provides coverage guarantee.
+        # Use the CTS-selected spec's midpoint as the point forecast, and
+        # build a conformal interval around it with the adaptive alpha.
+        cts_cg_alpha_full[t] = cts_cg_alpha_t
+
+        if track_coverage:
+            # Point forecast from CTS-selected spec
+            cg_pf = 0.5 * (intervals_matrix[t, cts_action, 0] + intervals_matrix[t, cts_action, 1])
+            cg_lo, cg_hi = _build_aci_interval(cg_pf, residual_buffer, cts_cg_alpha_t, fallback_hw)
+            cts_cg_widths_full[t] = cg_hi - cg_lo
+            cts_cg_scores_full[t] = _interval_score(
+                np.array([cg_lo]), np.array([cg_hi]),
+                np.array([targets[t]]), alpha=alpha_nominal,
+            )[0]
+            cg_err = 0.0 if (cg_lo <= targets[t] <= cg_hi) else 1.0
+            cts_cg_covered_full[t] = (cg_err == 0.0)
+
+            # ACI alpha update
+            cts_cg_alpha_t = cts_cg_alpha_t + config.cts_cg_gamma * (alpha_nominal - cg_err)
+            cts_cg_alpha_t = float(np.clip(cts_cg_alpha_t, 1e-6, 1.0 - 1e-6))
+        else:
+            cts_cg_scores_full[t] = row[cts_action]
+
+        # Update shared residual buffer (used by all ACI-family methods)
+        if track_coverage:
+            residual_buffer.append(targets[t] - pf_t)
 
         # Random
         random_scores_full[t] = row[rng.integers(0, K)]
@@ -456,6 +656,23 @@ def run_bandit_experiment(
     if cts_covered_full is not None:
         cts_covered = cts_covered_full[s:]
 
+    # Slice new arrays
+    cts_widths = cts_widths_full[s:] if track_coverage else None
+    aci_widths = aci_widths_full[s:] if track_coverage else None
+    aci_covered = aci_covered_full[s:] if track_coverage else None
+    agaci_scores = agaci_scores_full[s:]
+    agaci_alpha_history = agaci_alpha_full[s:]
+    agaci_covered = agaci_covered_full[s:] if track_coverage else None
+    agaci_widths = agaci_widths_full[s:] if track_coverage else None
+    faci_scores = faci_scores_full[s:]
+    faci_alpha_history = faci_alpha_full[s:]
+    faci_covered = faci_covered_full[s:] if track_coverage else None
+    faci_widths = faci_widths_full[s:] if track_coverage else None
+    cts_cg_scores = cts_cg_scores_full[s:]
+    cts_cg_alpha_history = cts_cg_alpha_full[s:]
+    cts_cg_covered = cts_cg_covered_full[s:] if track_coverage else None
+    cts_cg_widths = cts_cg_widths_full[s:] if track_coverage else None
+
     return BanditExperimentResult(
         scores_matrix=scores_out,
         contexts=contexts_out,
@@ -470,6 +687,21 @@ def run_bandit_experiment(
         cts_selections=cts_selections,
         optimal_specs=optimal_specs,
         cts_covered=cts_covered,
+        cts_widths=cts_widths,
+        aci_widths=aci_widths,
+        aci_covered=aci_covered,
+        agaci_scores=agaci_scores,
+        agaci_alpha_history=agaci_alpha_history,
+        agaci_covered=agaci_covered,
+        agaci_widths=agaci_widths,
+        faci_scores=faci_scores,
+        faci_alpha_history=faci_alpha_history,
+        faci_covered=faci_covered,
+        faci_widths=faci_widths,
+        cts_cg_scores=cts_cg_scores,
+        cts_cg_alpha_history=cts_cg_alpha_history,
+        cts_cg_covered=cts_cg_covered,
+        cts_cg_widths=cts_cg_widths,
     )
 
 
@@ -615,7 +847,7 @@ def build_scores_matrix_with_cqr(
     calibration_window: int = 50,
     forecasters: Optional[List] = None,
     calibration_windows: Optional[List[int]] = None,
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, Optional[np.ndarray]]:
     """
     Build a (T', K) scores matrix using conformalized prediction intervals.
 
@@ -692,6 +924,11 @@ def build_scores_matrix_with_cqr(
     intervals_matrix : ndarray, shape (T', K, 2)
         ``intervals_matrix[t, k]`` = ``[lower, upper]`` for spec *k*
         at timestep *t*.
+    point_forecasts : ndarray, shape (T',), or None
+        Shared ensemble point forecast at each scored timestep.
+        Available in calibration-selection mode (ensemble of diverse
+        forecasters) and forecaster mode (nanmean across forecasters).
+        None in lookback mode (no single shared forecast).
     """
     from conformal_ts.evaluation.metrics import interval_score
     from collections import deque
@@ -843,7 +1080,18 @@ def build_scores_matrix_with_cqr(
             # calibrate on past, predict on present).
             buf.append(y_true - mu)
 
-    return scores_matrix, contexts, targets_arr, intervals_arr
+    # Build point_forecasts output
+    if calib_mode:
+        point_forecasts_out = ensemble_forecast[min_history:]
+    elif all_forecasts is not None:
+        # Forecaster mode: nanmean across forecasters
+        stacked_fc = np.column_stack([fc[min_history:] for fc in all_forecasts])
+        with np.errstate(all="ignore"):
+            point_forecasts_out = np.nanmean(stacked_fc, axis=1)
+    else:
+        point_forecasts_out = None
+
+    return scores_matrix, contexts, targets_arr, intervals_arr, point_forecasts_out
 
 
 # ---------------------------------------------------------------------------
@@ -938,13 +1186,14 @@ if __name__ == "__main__":
     print(f"With return_intervals: targets shape={tgt2.shape}, "
           f"intervals shape={intv2.shape}")
 
-    # 2c. Test CQR-based builder
-    sm_cqr, ctx_cqr, tgt_cqr, intv_cqr = build_scores_matrix_with_cqr(
+    # 2c. Test CQR-based builder (now returns 5-tuple)
+    sm_cqr, ctx_cqr, tgt_cqr, intv_cqr, pf_cqr = build_scores_matrix_with_cqr(
         series, lookback_windows=lookbacks, alpha=0.10, min_history=100,
         calibration_window=50,
     )
     print(f"CQR scores matrix shape: {sm_cqr.shape}")
     print(f"CQR mean scores per spec: {sm_cqr.mean(axis=0).round(3)}")
+    print(f"CQR point_forecasts: {pf_cqr}")  # None for lookback mode
 
     # 3. Run bandit experiment (with coverage tracking)
     T, K = sm2.shape
@@ -978,5 +1227,26 @@ if __name__ == "__main__":
         print(f"  CTS coverage: {result.cts_covered.mean():.2%}")
     print(f"  ACI final alpha: {result.aci_alpha_history[-1]:.4f}")
     print(f"  Result arrays length (after train split): {len(result.cts_scores)}")
+
+    # Verify new baselines
+    print("\n--- New Baselines ---")
+    if result.agaci_scores is not None:
+        print(f"  AgACI mean score: {np.mean(result.agaci_scores):.4f}")
+    if result.agaci_covered is not None:
+        print(f"  AgACI coverage:   {np.mean(result.agaci_covered):.2%}")
+    if result.faci_scores is not None:
+        print(f"  FACI mean score:  {np.mean(result.faci_scores):.4f}")
+    if result.faci_covered is not None:
+        print(f"  FACI coverage:    {np.mean(result.faci_covered):.2%}")
+    if result.cts_cg_scores is not None:
+        print(f"  CTS-CG mean score: {np.mean(result.cts_cg_scores):.4f}")
+    if result.cts_cg_covered is not None:
+        print(f"  CTS-CG coverage:   {np.mean(result.cts_cg_covered):.2%}")
+    if result.aci_covered is not None:
+        print(f"  ACI coverage:      {np.mean(result.aci_covered):.2%}")
+    if result.aci_widths is not None:
+        print(f"  ACI mean width:    {np.mean(result.aci_widths):.4f}")
+    if result.cts_widths is not None:
+        print(f"  CTS mean width:    {np.mean(result.cts_widths):.4f}")
 
     print("\nSelf-test passed.")
