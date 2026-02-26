@@ -63,6 +63,7 @@ AVAILABLE_DATASETS = [
     "ETTh2",             # Electricity Transformer Temperature (station 2, hourly)
     "ETTm1",             # Electricity Transformer Temperature (station 1, 15-min)
     "ETTm2",             # Electricity Transformer Temperature (station 2, 15-min)
+    "AustralianElecDemand",  # Australian electricity demand (30-min, synthetic)
     "ExchangeRate",      # Daily exchange rates of 8 countries
     "Traffic",           # California freeway occupancy rates
 ]
